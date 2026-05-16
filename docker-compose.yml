@@ -1,0 +1,81 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ttd_pipeline
+      POSTGRES_USER: ttd
+      POSTGRES_PASSWORD: ttd
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ttd -d ttd_pipeline"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+  pipeline:
+    build: .
+    working_dir: /app
+    environment:
+      DATABASE_URL: postgresql://ttd:ttd@postgres:5432/ttd_pipeline
+      ZENDROP_API_URL: https://app.zendrop.com/mcp/v1
+      ZENDROP_DEFAULT_COUNTRY_CODE: ca
+    env_file:
+      - .env
+    volumes:
+      - ./storage:/app/storage
+      - ./output:/app/output
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    command: python -m app.cli --help
+  web:
+    build: .
+    working_dir: /app
+    environment:
+      DATABASE_URL: postgresql://ttd:ttd@postgres:5432/ttd_pipeline
+      STORAGE_DIR: /app/storage
+      ZENDROP_API_URL: https://app.zendrop.com/mcp/v1
+      ZENDROP_DEFAULT_COUNTRY_CODE: ca
+    env_file:
+      - .env
+    volumes:
+      - ./storage:/app/storage
+      - ./output:/app/output
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    command: uvicorn app.web:app --host 0.0.0.0 --port 8080
+  worker:
+    build: .
+    working_dir: /app
+    environment:
+      DATABASE_URL: postgresql://ttd:ttd@postgres:5432/ttd_pipeline
+      STORAGE_DIR: /app/storage
+      ZENDROP_API_URL: https://app.zendrop.com/mcp/v1
+      ZENDROP_DEFAULT_COUNTRY_CODE: ca
+    env_file:
+      - .env
+    volumes:
+      - ./storage:/app/storage
+      - ./output:/app/output
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    command: python -m app.worker
+
+volumes:
+  postgres_data:
+  redis_data:
