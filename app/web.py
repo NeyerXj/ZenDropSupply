@@ -44,6 +44,7 @@ ProductStatus = Literal[
     "skipped_male",
     "skipped_not_women",
     "skipped_season",
+    "skipped_language",
     "zendrop_matched",
     "draft_ready",
     "uploaded_draft",
@@ -78,6 +79,7 @@ class PipelineRunRequest(BaseModel):
     name: str = Field(default="Competitor batch", min_length=1, max_length=120)
     store_urls: list[str] = Field(min_length=1, max_length=50)
     pages_requested: int = Field(default=5, ge=1, le=20)
+    product_limit: int | None = Field(default=120, ge=1, le=200)
 
 
 class ApprovalStatusRequest(BaseModel):
@@ -105,6 +107,69 @@ class AnalyticsFileUploadRequest(BaseModel):
     content: str = Field(min_length=1)
     source_store_url: str | None = Field(default=None, max_length=500)
     run_id: int | None = None
+
+
+def approval_work_exists(database, product_match_id: int) -> bool:
+    if database.execute("select 1 from generated_contents where product_match_id = ?", (product_match_id,)).fetchone():
+        return True
+    rows = database.execute(
+        """
+        select payload_json
+        from pipeline_jobs
+        where stage = 'openai_content'
+          and status in ('queued', 'running', 'done')
+        """
+    ).fetchall()
+    for (payload_json,) in rows:
+        try:
+            if int(json.loads(payload_json).get("product_match_id") or 0) == product_match_id:
+                return True
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+    return False
+
+
+def cancel_approval_work(database, product_match_id: int, competitor_product_id: int) -> int:
+    canceled = 0
+    rows = database.execute(
+        """
+        select id, stage, payload_json
+        from pipeline_jobs
+        where status in ('queued', 'running')
+          and stage in ('openai_content', 'final_model_images', 'shopify_draft_upload')
+        """
+    ).fetchall()
+    for job_id, stage, payload_json in rows:
+        try:
+            payload = json.loads(payload_json)
+        except json.JSONDecodeError:
+            continue
+        if stage == "openai_content" and int(payload.get("product_match_id") or 0) != product_match_id:
+            continue
+        if stage in {"final_model_images", "shopify_draft_upload"} and int(payload.get("competitor_product_id") or 0) != competitor_product_id:
+            continue
+        database.execute(
+            """
+            update pipeline_jobs
+            set status = 'canceled',
+                error_message = null,
+                updated_at = current_timestamp
+            where id = ?
+            """,
+            (job_id,),
+        )
+        canceled += 1
+    database.execute("delete from generated_contents where product_match_id = ?", (product_match_id,))
+    database.execute("delete from generated_images where product_match_id = ?", (product_match_id,))
+    image_set_row = database.execute(
+        "select id from final_image_sets where competitor_product_id = ?",
+        (competitor_product_id,),
+    ).fetchone()
+    if image_set_row:
+        database.execute("delete from final_generated_images where image_set_id = ?", (image_set_row[0],))
+        database.execute("delete from final_image_sets where id = ?", (image_set_row[0],))
+    database.execute("delete from shopify_draft_products where competitor_product_id = ?", (competitor_product_id,))
+    return canceled
 
 
 LOGIN_HTML = """<!doctype html>
@@ -331,6 +396,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             name=request.name,
             store_urls=request.store_urls,
             pages_requested=request.pages_requested,
+            product_limit=request.product_limit,
         )
         jobs = list_pipeline_jobs(database=database, run_id=run["id"])
         return {"run": run, "jobs_count": len(jobs), "jobs": jobs}
@@ -424,7 +490,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> dict:
         row = database.execute(
             """
-            select pm.id, pj.run_id
+            select pm.id, pm.competitor_product_id, pm.status, pj.run_id
             from product_matches pm
             left join pipeline_jobs pj on pj.stage = 'approval_matching' and pj.status = 'done'
             where pm.id = ?
@@ -435,6 +501,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="Approval card not found")
+        content_job_queued = False
+        canceled_jobs = 0
         database.execute(
             """
             update product_matches
@@ -444,15 +512,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             (request.status, request.manual_supplier_url, product_match_id),
         )
         if request.status == "approved":
-            enqueue_pipeline_job(
+            if not approval_work_exists(database, product_match_id):
+                enqueue_pipeline_job(
+                    database=database,
+                    run_id=row[3],
+                    stage="openai_content",
+                    payload={"product_match_id": product_match_id},
+                    priority=200,
+                )
+                content_job_queued = True
+        else:
+            canceled_jobs = cancel_approval_work(
                 database=database,
-                run_id=row[1],
-                stage="openai_content",
-                payload={"product_match_id": product_match_id},
-                priority=200,
+                product_match_id=product_match_id,
+                competitor_product_id=row[1],
             )
         database.commit()
-        return {"id": product_match_id, "status": request.status}
+        return {
+            "id": product_match_id,
+            "status": request.status,
+            "content_job_queued": content_job_queued,
+            "canceled_jobs": canceled_jobs,
+        }
 
     @web_app.get("/api/filter-config")
     def filter_config(_: None = Depends(require_admin), database=Depends(get_database)) -> dict:

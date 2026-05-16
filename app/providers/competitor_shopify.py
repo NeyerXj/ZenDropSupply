@@ -22,8 +22,11 @@ class ProductLinkParser(HTMLParser):
             return
         parsed = urlparse(href)
         path_parts = [part for part in parsed.path.split("/") if part]
-        if len(path_parts) >= 2 and path_parts[0] == "products":
-            handle = path_parts[1]
+        if "products" in path_parts:
+            products_index = path_parts.index("products")
+            if len(path_parts) <= products_index + 1:
+                return
+            handle = path_parts[products_index + 1]
             if handle and handle not in self.handles:
                 self.handles.append(handle)
 
@@ -89,4 +92,3 @@ def _first_price(variants: list[dict[str, Any]]) -> float | None:
         return float(price)
     except (TypeError, ValueError):
         return None
-

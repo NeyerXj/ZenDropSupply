@@ -88,16 +88,22 @@ function renderPipelineRuns() {
 function renderJobActivity() {
   const target = document.getElementById("jobActivity");
   const jobs = state.jobStatus.active_jobs || [];
+  const failedJobs = state.jobStatus.failed_jobs || [];
   const summary = state.jobStatus.summary || [];
   if (!jobs.length) {
     const doneTotal = summary
       .filter((entry) => entry.status === "done")
       .reduce((total, entry) => total + Number(entry.count || 0), 0);
+    const failedTotal = summary
+      .filter((entry) => entry.status === "failed")
+      .reduce((total, entry) => total + Number(entry.count || 0), 0);
     target.innerHTML = `
       <div class="job-summary">
         <span>No active jobs</span>
         <strong>${doneTotal} done</strong>
+        ${failedTotal ? `<strong>${failedTotal} failed</strong>` : ""}
       </div>
+      ${failedJobs.length ? renderJobList(failedJobs, "Recent failed jobs") : ""}
     `;
     return;
   }
@@ -111,17 +117,29 @@ function renderJobActivity() {
       }).join("")}
     </div>
     <div class="job-list">
-      ${jobs.map((job) => `
-        <article class="job-row ${job.status}">
-          <div>
-            <strong>${job.stageLabel || job.stage}</strong>
-            <span>${job.status} · ${jobAge(job)}${job.run_id ? ` · run ${job.run_id}` : ""}</span>
-          </div>
-          <small>${jobPayloadLabel(job)}</small>
-          ${job.error_message ? `<p>${job.error_message}</p>` : ""}
-        </article>
-      `).join("")}
+      ${jobs.map(renderJobRow).join("")}
     </div>
+  `;
+}
+
+function renderJobList(jobs, label) {
+  return `
+    <div class="job-list" aria-label="${label}">
+      ${jobs.map(renderJobRow).join("")}
+    </div>
+  `;
+}
+
+function renderJobRow(job) {
+  return `
+    <article class="job-row ${job.status}">
+      <div>
+        <strong>${job.stageLabel || job.stage}</strong>
+        <span>${job.status} · ${jobAge(job)}${job.run_id ? ` · run ${job.run_id}` : ""}</span>
+      </div>
+      <small>${jobPayloadLabel(job)}</small>
+      ${job.error_message ? `<p>${job.error_message}</p>` : ""}
+    </article>
   `;
 }
 
@@ -154,8 +172,10 @@ function renderApprovalCards() {
     target.innerHTML = `<div class="empty-state">No match preview yet. Run sourcing first, then build preview from the next action panel.</div>`;
     return;
   }
-  target.innerHTML = state.approvalCards.map((card) => `
-    <article class="approval-card">
+  target.innerHTML = state.approvalCards.map((card) => {
+    const processed = card.status !== "approval_pending";
+    return `
+    <article class="approval-card ${card.status}">
       <div class="approval-images">
         ${approvalImage(card.competitor.image_url, "Competitor")}
         ${approvalImage(card.zendrop.image_url, "Zendrop")}
@@ -166,20 +186,21 @@ function renderApprovalCards() {
           <p>Zendrop: ${card.zendrop.name}</p>
         </div>
         <div class="approval-metrics">
-          <span>Status ${card.status}</span>
+          <span class="status-pill ${card.status}">${card.status}</span>
           <span>Competitor ${money(card.competitor.price)}</span>
           <span>Zendrop ${money(card.zendrop.price_usd)} + ship ${money(card.zendrop.shipping_price_usd)} = ${money(card.zendrop.total_cost_usd)}</span>
           <span>Text match ${Math.round(card.zendrop_match_score)} · ${card.visual_status}</span>
         </div>
         <div class="approval-actions">
-          <button type="button" data-approval-action="approved" data-match-id="${card.id}">Approve</button>
-          <button class="secondary" type="button" data-approval-action="skipped" data-match-id="${card.id}">Skip</button>
-          <button class="danger" type="button" data-approval-action="rejected" data-match-id="${card.id}">Reject</button>
-          <input data-manual-url="${card.id}" placeholder="Manual URL">
+          <button type="button" data-approval-action="approved" data-match-id="${card.id}" ${card.status === "approved" ? "disabled" : ""}>Approve</button>
+          <button class="secondary" type="button" data-approval-action="skipped" data-match-id="${card.id}" ${card.status === "skipped" ? "disabled" : ""}>Skip</button>
+          <button class="danger" type="button" data-approval-action="rejected" data-match-id="${card.id}" ${card.status === "rejected" ? "disabled" : ""}>Reject</button>
+          <input data-manual-url="${card.id}" placeholder="Manual URL" ${processed ? "disabled" : ""} value="${card.manual_supplier_url || ""}">
         </div>
       </div>
     </article>
-  `).join("");
+  `;
+  }).join("");
   target.querySelectorAll("[data-approval-action]").forEach((button) => {
     button.addEventListener("click", () => updateApprovalStatus(button.dataset.matchId, button.dataset.approvalAction));
   });
@@ -396,6 +417,7 @@ async function startSourcing(form) {
         name: form.elements.name.value || "Competitor sourcing",
         store_urls: storeUrls,
         pages_requested: Number(form.elements.pages_requested.value),
+        product_limit: Number(form.elements.limit.value),
       }),
     });
     jobsCount = result.jobs_count || 0;
@@ -456,18 +478,26 @@ async function runNextAction() {
 
 async function updateApprovalStatus(productMatchId, status) {
   const input = document.querySelector(`[data-manual-url="${productMatchId}"]`);
+  const card = document.querySelector(`[data-match-id="${productMatchId}"]`)?.closest(".approval-card");
+  const buttons = card ? Array.from(card.querySelectorAll("[data-approval-action]")) : [];
   try {
-    await fetchJson(`/api/approval-cards/${productMatchId}/status`, {
+    buttons.forEach((button) => { button.disabled = true; });
+    const result = await fetchJson(`/api/approval-cards/${productMatchId}/status`, {
       method: "POST",
       body: JSON.stringify({
         status,
         manual_supplier_url: input?.value || null,
       }),
     });
-    showToast(status === "approved" ? "Approved. Product enhancer queued." : `Card marked as ${status}.`);
+    if (status === "approved") {
+      showToast(result.content_job_queued ? "Approved. Product enhancer queued." : "Approved. Product enhancer already exists.");
+    } else {
+      showToast(result.canceled_jobs ? `Card marked as ${status}. ${result.canceled_jobs} jobs canceled.` : `Card marked as ${status}.`);
+    }
     await loadState();
   } catch (error) {
     showToast(error.message);
+    buttons.forEach((button) => { button.disabled = false; });
   }
 }
 

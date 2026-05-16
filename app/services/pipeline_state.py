@@ -21,6 +21,7 @@ def create_competitor_batch_run(
     name: str,
     store_urls: list[str],
     pages_requested: int,
+    product_limit: int | None = None,
 ) -> dict:
     normalized_urls = normalize_store_urls(store_urls)
     run_id = database.execute(
@@ -31,7 +32,10 @@ def create_competitor_batch_run(
         """,
         (
             name.strip() or "Competitor batch",
-            json.dumps({"store_urls": normalized_urls, "pages_requested": pages_requested}, ensure_ascii=False),
+            json.dumps(
+                {"store_urls": normalized_urls, "pages_requested": pages_requested, "product_limit": product_limit},
+                ensure_ascii=False,
+            ),
         ),
     ).fetchone()[0]
     for store_url in normalized_urls:
@@ -50,7 +54,7 @@ def create_competitor_batch_run(
             database=database,
             run_id=run_id,
             stage="competitor_scrape",
-            payload={"store_url": store_url, "pages": pages_requested},
+            payload={"store_url": store_url, "pages": pages_requested, "limit": product_limit},
         )
     database.commit()
     return get_pipeline_run(database, run_id)
@@ -141,12 +145,24 @@ def get_pipeline_activity(database: sqlite3.Connection, limit: int = 20) -> dict
         select id, run_id, stage, status, priority, payload_json, result_json, error_message,
             created_at, updated_at, locked_at
         from pipeline_jobs
-        where status in ('queued', 'running', 'failed')
+        where status in ('queued', 'running')
           and stage in ({stage_placeholders})
         order by
-            case status when 'running' then 0 when 'queued' then 1 when 'failed' then 2 else 3 end,
+            case status when 'running' then 0 when 'queued' then 1 else 2 end,
             priority asc,
             id asc
+        limit ?
+        """,
+        (*ACTIVE_PIPELINE_STAGES, limit),
+    ).fetchall()
+    failed_rows = database.execute(
+        f"""
+        select id, run_id, stage, status, priority, payload_json, result_json, error_message,
+            created_at, updated_at, locked_at
+        from pipeline_jobs
+        where status = 'failed'
+          and stage in ({stage_placeholders})
+        order by updated_at desc, id desc
         limit ?
         """,
         (*ACTIVE_PIPELINE_STAGES, limit),
@@ -157,6 +173,7 @@ def get_pipeline_activity(database: sqlite3.Connection, limit: int = 20) -> dict
             for row in summary_rows
         ],
         "active_jobs": [serialize_pipeline_activity_job(row) for row in active_rows],
+        "failed_jobs": [serialize_pipeline_activity_job(row) for row in failed_rows],
     }
 
 

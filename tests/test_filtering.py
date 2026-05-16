@@ -29,16 +29,16 @@ def test_default_filter_keeps_women_summer_products():
     assert classify_product_status(product) == "ready_for_zendrop"
 
 
-def test_default_filter_keeps_german_women_maxi_dress():
+def test_default_filter_rejects_german_women_maxi_dress():
     product = make_product("Maxikleid Damen", product_type="SS - Womens - Dresses", tags=["VDMAX"])
 
-    assert classify_product_status(product) == "ready_for_zendrop"
+    assert classify_product_status(product) == "skipped_language"
 
 
-def test_default_filter_keeps_spring_summer_womens_product_type():
+def test_default_filter_rejects_non_english_spring_summer_product_type():
     product = make_product("Orthopädische Schuhe Damen", product_type="SS - Womens - Shoes & Heels", tags=["VSORTHO"])
 
-    assert classify_product_status(product) == "ready_for_zendrop"
+    assert classify_product_status(product) == "skipped_language"
 
 
 def test_default_filter_rejects_male_products_before_season_match():

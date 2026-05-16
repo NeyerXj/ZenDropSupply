@@ -514,6 +514,15 @@ button:disabled {
   padding: 12px;
 }
 
+.approval-card.approved {
+  border-color: rgba(47, 111, 99, 0.35);
+}
+
+.approval-card.rejected,
+.approval-card.skipped {
+  opacity: 0.68;
+}
+
 .approval-images {
   display: grid;
   gap: 8px;
@@ -765,9 +774,16 @@ textarea:focus {
 .status-pill.rejected,
 .status-pill.skipped_male,
 .status-pill.skipped_not_women,
-.status-pill.skipped_season {
+.status-pill.skipped_season,
+.status-pill.skipped_language,
+.status-pill.skipped {
   border-color: rgba(159, 64, 79, 0.22);
   color: var(--rose);
+}
+
+.status-pill.approved {
+  border-color: rgba(47, 111, 99, 0.25);
+  color: var(--accent-strong);
 }
 
 .row-actions {

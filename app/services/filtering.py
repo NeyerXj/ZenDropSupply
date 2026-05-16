@@ -12,12 +12,9 @@ DEFAULT_WOMEN_KEYWORDS = [
     "women",
     "womens",
     "woman",
-    "damen",
     "ladies",
     "lady",
     "female",
-    "kleid",
-    "maxikleid",
     "dress",
     "dresses",
     "skirt",
@@ -34,8 +31,6 @@ DEFAULT_SUMMER_KEYWORDS = [
     "summer",
     "ss womens",
     "ss",
-    "kleid",
-    "maxikleid",
     "dress",
     "maxi",
     "sandal",
@@ -57,6 +52,29 @@ DEFAULT_SUMMER_KEYWORDS = [
     "necklace",
 ]
 DEFAULT_EXCLUDE_KEYWORDS = ["winter", "coat", "jacket", "hoodie", "sweater", "boots", "thermal", "fleece"]
+NON_ENGLISH_MARKERS = {
+    "damen",
+    "herren",
+    "kleid",
+    "maxikleid",
+    "schuhe",
+    "orthopadische",
+    "orthopädische",
+    "schmerzlinderung",
+    "dampfende",
+    "dämpfende",
+    "unterstutzung",
+    "unterstützung",
+    "stossdampfender",
+    "stoßdämpfender",
+    "beinschlitz",
+    "tragerloser",
+    "trägerloser",
+    "fliessende",
+    "fließende",
+    "ubergangsjacke",
+    "übergangsjacke",
+}
 
 
 @dataclass(frozen=True)
@@ -79,9 +97,11 @@ DEFAULT_FILTER_CONFIG = ProductFilterConfig(
 
 def classify_product_status(product: CompetitorProduct, config: ProductFilterConfig | None = None) -> str:
     filter_config = config or DEFAULT_FILTER_CONFIG
-    searchable_text = normalize_text(" ".join([product.handle, product.title, product.product_type or "", *product.tags]))
+    searchable_text = normalize_text(" ".join([product.title, product.product_type or "", *product.tags]))
     words = set(searchable_text.split())
 
+    if not is_english_product(product, words):
+        return "skipped_language"
     if matches_keywords(searchable_text, words, filter_config.male_keywords):
         return "skipped_male"
     if not matches_keywords(searchable_text, words, filter_config.women_keywords):
@@ -189,3 +209,10 @@ def matches_keywords(searchable_text: str, words: set[str], keywords: list[str])
 def is_spring_summer_product(product_type: str | None) -> bool:
     normalized_product_type = normalize_text(product_type or "")
     return normalized_product_type.startswith("ss womens") or normalized_product_type.startswith("ss women")
+
+
+def is_english_product(product: CompetitorProduct, words: set[str]) -> bool:
+    title_and_type = f"{product.title} {product.product_type or ''}"
+    if re.search(r"[^\x00-\x7F]", title_and_type):
+        return False
+    return not words.intersection(NON_ENGLISH_MARKERS)

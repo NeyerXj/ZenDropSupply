@@ -11,6 +11,7 @@ PRODUCT_STATUSES = {
     "skipped_male",
     "skipped_not_women",
     "skipped_season",
+    "skipped_language",
     "zendrop_matched",
     "draft_ready",
     "uploaded_draft",

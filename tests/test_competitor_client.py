@@ -8,6 +8,7 @@ from app.providers.competitor_shopify import CompetitorShopifyClient
 async def test_fetch_collection_handles_extracts_unique_product_handles():
     html = """
     <a href="/products/floral-maxi-dress">Dress</a>
+    <a href="/en/products/linen-summer-dress">Localized Dress</a>
     <a href="https://example.com/products/summer-sandals?variant=1">Sandals</a>
     <a href="/products/floral-maxi-dress">Duplicate</a>
     """
@@ -19,7 +20,7 @@ async def test_fetch_collection_handles_extracts_unique_product_handles():
         client = CompetitorShopifyClient(http_client=http_client)
         handles = await client.fetch_collection_handles("https://example.com", page=1)
 
-    assert handles == ["floral-maxi-dress", "summer-sandals"]
+    assert handles == ["floral-maxi-dress", "linen-summer-dress", "summer-sandals"]
 
 
 @pytest.mark.asyncio

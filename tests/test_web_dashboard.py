@@ -171,6 +171,7 @@ def test_dashboard_creates_batch_pipeline_run(tmp_path):
             "name": "velanora smoke",
             "store_urls": ["velanora-fashion.com", "https://example.com/"],
             "pages_requested": 5,
+            "product_limit": 20,
         },
     )
     list_response = client.get("/api/runs")
@@ -179,8 +180,10 @@ def test_dashboard_creates_batch_pipeline_run(tmp_path):
     assert response.json()["run"]["raw_input"] == {
         "store_urls": ["https://velanora-fashion.com", "https://example.com"],
         "pages_requested": 5,
+        "product_limit": 20,
     }
     assert response.json()["jobs_count"] == 2
+    assert response.json()["jobs"][0]["payload"]["limit"] == 20
     assert list_response.status_code == 200
     assert list_response.json()["runs"][0]["name"] == "velanora smoke"
 
@@ -206,7 +209,7 @@ def test_dashboard_exposes_job_status_for_ui_state(tmp_path):
     assert {"stage": "zendrop_search", "status": "running", "count": 1} in payload["summary"]
     assert payload["active_jobs"][0]["stage"] == "zendrop_search"
     assert payload["active_jobs"][0]["locked_at"] is not None
-    assert payload["active_jobs"][1]["error_message"] == "bad match"
+    assert payload["failed_jobs"][0]["error_message"] == "bad match"
 
 
 def test_dashboard_uploads_analytics_text_file(tmp_path):
@@ -315,12 +318,83 @@ def test_dashboard_approves_card_and_queues_openai_content(tmp_path):
 
     assert response.status_code == 200
     assert response.json()["status"] == "approved"
+    assert response.json()["content_job_queued"] is True
     with open_database(settings.database_url) as database:
         jobs = database.execute("select stage, status, payload_json from pipeline_jobs where stage = 'openai_content'").fetchall()
     assert len(jobs) == 1
     assert jobs[0][0] == "openai_content"
     assert jobs[0][1] == "queued"
     assert str(product_match_id) in jobs[0][2]
+
+    repeat_response = client.post(f"/api/approval-cards/{product_match_id}/status", json={"status": "approved"})
+
+    assert repeat_response.status_code == 200
+    assert repeat_response.json()["content_job_queued"] is False
+    with open_database(settings.database_url) as database:
+        jobs_count = database.execute("select count(*) from pipeline_jobs where stage = 'openai_content'").fetchone()[0]
+    assert jobs_count == 1
+
+
+def test_dashboard_rejects_card_and_cancels_pending_approval_work(tmp_path):
+    settings = Settings(database_url=f"sqlite:///{tmp_path / 'pipeline.db'}", storage_dir=tmp_path / "storage")
+    with open_database(settings.database_url) as database:
+        database.execute(
+            """
+            insert into competitor_products (store_url, handle, title, tags_json, status, raw_json)
+            values ('https://example.com', 'dress', 'Floral Dress', '[]', 'ready_for_zendrop', '{}')
+            """
+        )
+        competitor_product_id = database.execute("select id from competitor_products").fetchone()[0]
+        database.execute(
+            "insert into zendrop_products (product_id, name, raw_json) values (2331830, 'Floral Dress', '{}')"
+        )
+        database.execute(
+            """
+            insert into product_matches (
+                competitor_product_id, zendrop_product_id, zendrop_match_score, status
+            )
+            values (?, 2331830, 90, 'approved')
+            """,
+            (competitor_product_id,),
+        )
+        product_match_id = database.execute("select id from product_matches").fetchone()[0]
+        database.execute(
+            """
+            insert into pipeline_jobs (stage, status, payload_json, result_json)
+            values ('openai_content', 'queued', ?, '{}')
+            """,
+            (json.dumps({"product_match_id": product_match_id}),),
+        )
+        database.execute(
+            """
+            insert into pipeline_jobs (stage, status, payload_json, result_json)
+            values ('final_model_images', 'running', ?, '{}')
+            """,
+            (json.dumps({"competitor_product_id": competitor_product_id}),),
+        )
+        database.execute(
+            """
+            insert into generated_contents (product_match_id, title, description, size_chart_json, raw_json)
+            values (?, 'Title', 'Description', '{}', '{}')
+            """,
+            (product_match_id,),
+        )
+        database.commit()
+
+    client = authenticated_client(settings)
+
+    response = client.post(f"/api/approval-cards/{product_match_id}/status", json={"status": "rejected"})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "rejected"
+    assert response.json()["canceled_jobs"] == 2
+    with open_database(settings.database_url) as database:
+        match_status = database.execute("select status from product_matches where id = ?", (product_match_id,)).fetchone()[0]
+        canceled_jobs = database.execute("select count(*) from pipeline_jobs where status = 'canceled'").fetchone()[0]
+        content_rows = database.execute("select count(*) from generated_contents").fetchone()[0]
+    assert match_status == "rejected"
+    assert canceled_jobs == 2
+    assert content_rows == 0
 
 
 def test_zendrop_run_requires_api_token(tmp_path):
