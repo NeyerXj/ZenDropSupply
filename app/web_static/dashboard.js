@@ -237,8 +237,11 @@ function renderNextAction() {
   const button = document.getElementById("nextActionButton");
   const title = document.getElementById("nextActionTitle");
   const description = document.getElementById("nextActionDescription");
-  const finalReady = state.finalProducts.filter((product) => product.generated_count >= 5).length;
-  const uploaded = state.finalProducts.filter((product) => product.media_count >= 5).length;
+  const readyProducts = state.finalProducts.filter((product) =>
+    product.image_status === "ready" && Number(product.generated_count || 0) >= 5
+  );
+  const finalReady = readyProducts.length;
+  const uploaded = readyProducts.filter((product) => Number(product.media_count || 0) >= 5).length;
   const approvedCards = state.approvalCards.filter((card) => card.status === "approved").length;
   const activeJobs = state.jobStatus.active_jobs || [];
   const runningJobs = activeJobs.filter((job) => job.status === "running");

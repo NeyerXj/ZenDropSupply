@@ -47,13 +47,16 @@ class OpenAIContentClient:
                     "Price must be at least total_cost_usd * 3.0. "
                     "compare_at_price_usd must be 30-45 percent above price_usd."
                 ),
-                "input": json.dumps({**payload, "minimum_price_usd": minimum_price}, ensure_ascii=False),
+                "input": (
+                    "Return JSON only. Input JSON: "
+                    + json.dumps({**payload, "minimum_price_usd": minimum_price}, ensure_ascii=False)
+                ),
                 "text": {"format": {"type": "json_object"}},
             },
             timeout=60,
         )
         if response.status_code >= 400:
-            raise OpenAIContentError(f"OpenAI content generation failed: HTTP {response.status_code}")
+            raise OpenAIContentError(f"OpenAI content generation failed: HTTP {response.status_code}: {response.text[:800]}")
         raw = response.json()
         parsed = parse_response_json(raw)
         price_usd = max(float(parsed.get("price_usd") or minimum_price), minimum_price)

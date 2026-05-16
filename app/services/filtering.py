@@ -12,9 +12,12 @@ DEFAULT_WOMEN_KEYWORDS = [
     "women",
     "womens",
     "woman",
+    "damen",
     "ladies",
     "lady",
     "female",
+    "kleid",
+    "maxikleid",
     "dress",
     "dresses",
     "skirt",
@@ -29,6 +32,10 @@ DEFAULT_WOMEN_KEYWORDS = [
 DEFAULT_MALE_KEYWORDS = ["men", "mens", "male", "man", "boys", "boy"]
 DEFAULT_SUMMER_KEYWORDS = [
     "summer",
+    "ss womens",
+    "ss",
+    "kleid",
+    "maxikleid",
     "dress",
     "maxi",
     "sandal",
@@ -81,7 +88,9 @@ def classify_product_status(product: CompetitorProduct, config: ProductFilterCon
         return "skipped_not_women"
     if matches_keywords(searchable_text, words, filter_config.exclude_keywords):
         return "skipped_season"
-    if not matches_keywords(searchable_text, words, filter_config.summer_keywords):
+    if not matches_keywords(searchable_text, words, filter_config.summer_keywords) and not is_spring_summer_product(
+        product.product_type
+    ):
         return "skipped_season"
     return "ready_for_zendrop"
 
@@ -175,3 +184,8 @@ def matches_keywords(searchable_text: str, words: set[str], keywords: list[str])
         if len(keyword_words) > 1 and keyword in searchable_text:
             return True
     return False
+
+
+def is_spring_summer_product(product_type: str | None) -> bool:
+    normalized_product_type = normalize_text(product_type or "")
+    return normalized_product_type.startswith("ss womens") or normalized_product_type.startswith("ss women")
