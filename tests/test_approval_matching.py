@@ -86,3 +86,48 @@ def test_build_approval_matches_uses_zendrop_only(tmp_path):
     assert result == {"matches_created": 1}
     assert cards[0]["zendrop"]["product_id"] == 2807078
     assert cards[0]["zendrop"]["total_cost_usd"] == 27.0
+
+
+def test_build_approval_matches_keeps_low_confidence_zendrop_candidate_for_review(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'pipeline.db'}"
+    with open_database(database_url) as database:
+        database.execute(
+            """
+            insert into competitor_products (
+                store_url, handle, title, price, tags_json, status, raw_json
+            )
+            values (
+                'https://example.com',
+                'maxi-kleid',
+                'Maxi Kleid Damen | Eleganter Fall & Beinschlitz',
+                39.95,
+                '[]',
+                'ready_for_zendrop',
+                '{}'
+            )
+            """
+        )
+        database.execute(
+            """
+            insert into zendrop_products (
+                product_id, name, price_usd, image_url, raw_json, shipping_country_code, shipping_price_usd
+            )
+            values (
+                2809564,
+                'Elegant Off-Shoulder Maxi Dress with Slit Design',
+                10.12,
+                'https://file.zendrop.com/maxi.jpg',
+                '{}',
+                'ca',
+                9.10
+            )
+            """
+        )
+        database.commit()
+
+        result = build_approval_matches(database=database)
+        cards = list_approval_cards(database=database, storage_dir=tmp_path / "storage")
+
+    assert result == {"matches_created": 1}
+    assert cards[0]["zendrop"]["product_id"] == 2809564
+    assert cards[0]["visual_status"] == "review"

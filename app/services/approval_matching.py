@@ -9,7 +9,7 @@ from app.services.dashboard import media_url_for_path
 from app.services.search_terms import zendrop_search_text
 
 
-def build_approval_matches(database: sqlite3.Connection, min_score: float = 55) -> dict[str, int]:
+def build_approval_matches(database: sqlite3.Connection, min_score: float = 35) -> dict[str, int]:
     zendrop_rows = database.execute(
         """
         select product_id, name, price_usd, shipping_price_usd
@@ -46,19 +46,21 @@ def build_zendrop_only_matches(database: sqlite3.Connection, zendrop_rows: list[
             continue
         zendrop_product_id, score, price_usd, shipping_price_usd = candidate
         total_cost = (price_usd or 0) + (shipping_price_usd or 0)
+        visual_status = "review" if score < 55 else "pending"
         database.execute(
             """
             insert into product_matches (
                 competitor_product_id,
                 zendrop_product_id,
                 zendrop_match_score,
+                visual_status,
                 total_cost_usd,
                 status,
                 updated_at
             )
-            values (?, ?, ?, ?, 'approval_pending', current_timestamp)
+            values (?, ?, ?, ?, ?, 'approval_pending', current_timestamp)
             """,
-            (competitor_product_id, zendrop_product_id, score, total_cost),
+            (competitor_product_id, zendrop_product_id, score, visual_status, total_cost),
         )
         matches_created += 1
     return matches_created
