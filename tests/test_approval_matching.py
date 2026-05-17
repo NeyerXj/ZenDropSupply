@@ -655,6 +655,77 @@ def test_build_approval_matches_retries_next_candidate_after_rejected_zendrop_it
     assert cards[0]["visual_status"] == "vision_pass"
 
 
+def test_build_approval_matches_checks_more_than_first_five_candidates(tmp_path, monkeypatch):
+    database_url = f"sqlite:///{tmp_path / 'pipeline.db'}"
+    image_path = tmp_path / "storage" / "competitor_images" / "dress.jpg"
+    image_path.parent.mkdir(parents=True)
+    image_path.write_bytes(b"image")
+
+    def fake_visual_match(**kwargs):
+        image_url = kwargs["zendrop_image_url"]
+        is_target = image_url.endswith("candidate-6.webp")
+        return {
+            "same_product": is_target,
+            "confidence": 0.82 if is_target else 0.12,
+            "source": "openai_vision",
+            "zendrop_image_is_product_photo": True,
+            "category_match": True,
+            "silhouette_match": is_target,
+            "color_match": is_target,
+            "material_match": is_target,
+            "key_details_match": is_target,
+            "reason": "Candidate 6 is the first close visual match" if is_target else "Different dress",
+        }
+
+    monkeypatch.setattr(approval_matching, "verify_visual_match", fake_visual_match)
+
+    with open_database(database_url) as database:
+        database.execute(
+            """
+            insert into competitor_products (
+                store_url, handle, title, price, image_path, tags_json, status, raw_json
+            )
+            values (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "https://example.com",
+                "red-maxi-dress",
+                "Red Strapless Maxi Dress",
+                79.0,
+                str(image_path),
+                "[]",
+                "ready_for_zendrop",
+                "{}",
+            ),
+        )
+        for product_id in range(1001, 1008):
+            database.execute(
+                """
+                insert into zendrop_products (
+                    product_id, name, price_usd, image_url, raw_json, shipping_country_code, shipping_price_usd
+                )
+                values (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    product_id,
+                    "Red Strapless Maxi Dress",
+                    10.0,
+                    f"https://file.zendrop.com/candidate-{product_id - 1000}.webp",
+                    "{}",
+                    "ca",
+                    5.0,
+                ),
+            )
+        database.commit()
+
+        result = build_approval_matches(database=database, min_score=50)
+        cards = list_approval_cards(database=database, storage_dir=tmp_path / "storage")
+
+    assert result == {"matches_created": 1}
+    assert cards[0]["zendrop"]["product_id"] == 1006
+    assert cards[0]["visual_status"] == "vision_pass"
+
+
 def test_build_approval_matches_uses_zendrop_only(tmp_path):
     database_url = f"sqlite:///{tmp_path / 'pipeline.db'}"
     with open_database(database_url) as database:

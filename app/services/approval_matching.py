@@ -102,9 +102,10 @@ FOOTWEAR_WORDS = {
     "slides",
 }
 
-VISION_PASS_CONFIDENCE = 0.75
-VISION_REVIEW_CONFIDENCE = 0.60
-VISION_NEAR_REVIEW_CONFIDENCE = 0.40
+VISION_CANDIDATE_LIMIT = 12
+VISION_PASS_CONFIDENCE = 0.72
+VISION_REVIEW_CONFIDENCE = 0.55
+VISION_NEAR_REVIEW_CONFIDENCE = 0.35
 
 
 def build_approval_matches(
@@ -257,7 +258,7 @@ def build_zendrop_only_matches(
             zendrop_rows=zendrop_rows,
             min_score=min_score,
             excluded_product_ids=rejected_zendrop_ids,
-            limit=5,
+            limit=VISION_CANDIDATE_LIMIT,
             source_queries=match_source_queries(competitor_title, competitor_raw_json),
         )
         candidate, rejected_candidates = choose_vision_verified_candidate(
@@ -530,13 +531,16 @@ def verify_visual_match(
                 json={
                     "model": openai_settings.model,
                     "instructions": (
-                        "You are a strict ecommerce product visual matcher. Return JSON only. "
+                        "You are an ecommerce product visual matcher for supplier sourcing. Return JSON only. "
                         "The second image must be a real product photo. Reject size charts, measurement tables, "
                         "text-heavy guide images, packaging-only images, or images where the wearable product is not visible. "
-                        "Pass when the images look at least 75% like the same sellable product. "
-                        "Use confidence 0.60-0.74 for close candidates that need human review. "
-                        "Reject different color families, different silhouettes or cuts, different shoe construction, "
-                        "different heel/sole style, different sleeve/strap style, different pattern, and different overall design."
+                        "A match does not need to be identical. Compare weighted criteria: product type, color, silhouette, "
+                        "material, size/variant compatibility, key details, and overall look. Product type and silhouette "
+                        "matter most. Color, material, pattern, and small detail differences lower confidence but do not "
+                        "automatically reject when the overall sellable product is close. Pass strong close matches at 0.72+. "
+                        "Use 0.55-0.71 for good manual-review candidates. Use 0.35-0.54 only when type and silhouette match "
+                        "but some details differ. Reject clearly different product types, clearly different silhouettes/cuts, "
+                        "different shoe construction, or different overall product families."
                     ),
                     "input": [
                         {
@@ -547,7 +551,8 @@ def verify_visual_match(
                                     "text": (
                                         "Return JSON with keys same_product boolean, confidence number 0-1, "
                                         "zendrop_image_is_product_photo boolean, "
-                                        "category_match, silhouette_match, color_match, pattern_match, closure_match booleans, "
+                                        "category_match, silhouette_match, color_match, material_match, pattern_match, "
+                                        "closure_match, variant_match, key_details_match booleans, "
                                         f"reason string. Competitor title: {competitor_title}. Zendrop title: {zendrop_name or zendrop_title}."
                                     ),
                                 },
@@ -575,14 +580,17 @@ def classify_visual_verdict(payload: dict[str, Any]) -> str | None:
     if payload.get("category_match") is False:
         return None
     confidence = verdict_confidence(payload)
-    strict_keys = ("category_match", "silhouette_match", "color_match")
-    strict_match = all(payload.get(key) is not False for key in strict_keys)
+    secondary_matches = visual_secondary_match_count(payload)
+    strong_shape_match = payload.get("silhouette_match") is not False
     if bool(payload.get("same_product")) and confidence >= VISION_PASS_CONFIDENCE:
-        return "vision_pass" if strict_match else "vision_review"
+        return "vision_pass" if strong_shape_match and secondary_matches >= 1 else "vision_review"
+    if bool(payload.get("same_product")) and confidence >= VISION_REVIEW_CONFIDENCE:
+        return "vision_review"
     if (
         confidence >= VISION_NEAR_REVIEW_CONFIDENCE
         and payload.get("category_match") is True
         and payload.get("silhouette_match") is True
+        and secondary_matches >= 1
     ):
         return "vision_review"
     if payload.get("same_product") is False:
@@ -590,6 +598,18 @@ def classify_visual_verdict(payload: dict[str, Any]) -> str | None:
     if confidence >= VISION_REVIEW_CONFIDENCE:
         return "vision_review"
     return None
+
+
+def visual_secondary_match_count(payload: dict[str, Any]) -> int:
+    keys = (
+        "color_match",
+        "material_match",
+        "pattern_match",
+        "closure_match",
+        "variant_match",
+        "key_details_match",
+    )
+    return sum(1 for key in keys if payload.get(key) is True)
 
 
 def verdict_confidence(payload: dict[str, Any]) -> float:
