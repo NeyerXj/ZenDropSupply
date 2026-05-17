@@ -353,22 +353,35 @@ def approval_match_diagnostics(database, competitor_product_id: int) -> dict[str
         order by updated_at desc, product_id desc
         """
     ).fetchall()
+    rejected_zendrop_ids = {
+        row[0]
+        for row in database.execute(
+            """
+            select zendrop_product_id
+            from product_matches
+            where competitor_product_id = ? and status = 'rejected'
+            """,
+            (competitor_product_id,),
+        ).fetchall()
+    }
     candidates = find_top_zendrop_matches(
         search_text=zendrop_search_text(product_row[0]),
         zendrop_rows=zendrop_rows,
         min_score=0,
-        excluded_product_ids=set(),
+        excluded_product_ids=rejected_zendrop_ids,
         limit=3,
     )
     if not candidates:
         return {
             "product_title": product_row[0],
-            "reason": "No Zendrop text candidates passed category and score filters",
+            "reason": "No unbanned Zendrop candidates passed category and score filters",
+            "rejected_candidates": len(rejected_zendrop_ids),
             "candidates": [],
         }
     return {
         "product_title": product_row[0],
-        "reason": "Text candidates existed, but AI Vision did not pass and text score was below review threshold",
+        "reason": "AI Vision rejected current candidates; rejected Zendrop items are banned for this source product",
+        "rejected_candidates": len(rejected_zendrop_ids),
         "candidates": [
             {"product_id": row[0], "name": row[1], "score": row[2]}
             for row in candidates

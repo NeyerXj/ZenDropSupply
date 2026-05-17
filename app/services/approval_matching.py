@@ -65,7 +65,7 @@ ATTRIBUTE_WORDS = {
     "heels",
 }
 
-VISION_REVIEW_TEXT_SCORE = 84
+VISION_PASS_CONFIDENCE = 0.80
 
 
 def build_approval_matches(
@@ -188,13 +188,14 @@ def build_zendrop_only_matches(
             excluded_product_ids=rejected_zendrop_ids,
             limit=5,
         )
-        candidate = choose_vision_verified_candidate(
+        candidate, rejected_candidates = choose_vision_verified_candidate(
             competitor_title=competitor_title,
             competitor_image_path=competitor_image_path,
             candidates=candidates,
             openai_settings=openai_settings,
             storage_dir=storage_dir,
         )
+        store_rejected_candidates(database, competitor_product_id, rejected_candidates)
         if candidate is None:
             continue
         zendrop_product_id, _name, score, price_usd, shipping_price_usd, selected_image_url, visual_status = candidate
@@ -265,9 +266,10 @@ def choose_vision_verified_candidate(
     candidates: list[tuple],
     openai_settings: OpenAISettings | None,
     storage_dir: Path | None,
-) -> tuple | None:
-    review_candidate: tuple | None = None
+) -> tuple[tuple | None, list[dict[str, Any]]]:
+    rejected_candidates: list[dict[str, Any]] = []
     for product_id, name, score, price_usd, shipping_price_usd, image_url, raw_json in candidates:
+        product_rejected = False
         for candidate_image_url in zendrop_product_image_urls(image_url=image_url, raw_json=raw_json):
             verdict = verify_visual_match(
                 competitor_title=competitor_title,
@@ -279,24 +281,79 @@ def choose_vision_verified_candidate(
             )
             if verdict["same_product"]:
                 visual_status = "vision_pass" if verdict["source"] == "openai_vision" else "text_only"
-                return product_id, name, score, price_usd, shipping_price_usd, candidate_image_url, visual_status
-            if (
-                review_candidate is None
-                and verdict.get("zendrop_image_is_product_photo") is not False
-                and score >= VISION_REVIEW_TEXT_SCORE
-            ):
-                review_candidate = (
+                return (
                     product_id,
                     name,
                     score,
                     price_usd,
                     shipping_price_usd,
                     candidate_image_url,
-                    "vision_review",
+                    visual_status,
+                ), rejected_candidates
+            product_rejected = True
+        if product_rejected:
+            rejected_candidates.append(
+                {
+                    "product_id": product_id,
+                    "score": score,
+                    "price_usd": price_usd,
+                    "shipping_price_usd": shipping_price_usd,
+                    "image_url": image_url,
+                    "reason": "AI Vision rejected this Zendrop candidate for the current source product",
+                }
+            )
+    return None, rejected_candidates
+
+
+def store_rejected_candidates(
+    database: sqlite3.Connection,
+    competitor_product_id: int,
+    rejected_candidates: list[dict[str, Any]],
+) -> None:
+    for candidate in rejected_candidates:
+        total_cost = (candidate["price_usd"] or 0) + (candidate["shipping_price_usd"] or 0)
+        existing_match = database.execute(
+            """
+            select id
+            from product_matches
+            where competitor_product_id = ? and zendrop_product_id = ?
+            """,
+            (competitor_product_id, candidate["product_id"]),
+        ).fetchone()
+        if existing_match:
+            database.execute(
+                """
+                update product_matches
+                set zendrop_match_score = ?,
+                    visual_status = 'vision_rejected',
+                    total_cost_usd = ?,
+                    status = 'rejected',
+                    updated_at = current_timestamp
+                where id = ?
+                """,
+                (candidate["score"], total_cost, existing_match[0]),
+            )
+        else:
+            database.execute(
+                """
+                insert into product_matches (
+                    competitor_product_id,
+                    zendrop_product_id,
+                    zendrop_match_score,
+                    visual_status,
+                    total_cost_usd,
+                    status,
+                    updated_at
                 )
-    if review_candidate is not None:
-        return review_candidate
-    return None
+                values (?, ?, ?, 'vision_rejected', ?, 'rejected', current_timestamp)
+                """,
+                (
+                    competitor_product_id,
+                    candidate["product_id"],
+                    candidate["score"],
+                    total_cost,
+                ),
+            )
 
 
 def verify_visual_match(
@@ -326,8 +383,9 @@ def verify_visual_match(
                         "You are a strict ecommerce product visual matcher. Return JSON only. "
                         "The second image must be a real product photo. Reject size charts, measurement tables, "
                         "text-heavy guide images, packaging-only images, or images where the wearable product is not visible. "
-                        "Reject if product type, silhouette, color family, pattern, closure, heel/sole style, "
-                        "sleeve/strap style, or overall design do not match."
+                        "Only pass when the images look at least 80% like the same sellable product. "
+                        "Reject different color families, different silhouettes or cuts, different shoe construction, "
+                        "different heel/sole style, different sleeve/strap style, different pattern, and different overall design."
                     ),
                     "input": [
                         {
@@ -353,14 +411,21 @@ def verify_visual_match(
         if response.status_code >= 400:
             return {"same_product": False, "confidence": 0.0, "source": "openai_vision", "reason": response.text[:300]}
         payload = parse_openai_json(response.json())
-        same_product = (
-            bool(payload.get("same_product"))
-            and payload.get("zendrop_image_is_product_photo") is not False
-            and float(payload.get("confidence") or 0) >= 0.72
-        )
+        same_product = is_strict_visual_match(payload)
         return {**payload, "same_product": same_product, "source": "openai_vision"}
     except Exception as error:
         return {"same_product": False, "confidence": 0.0, "source": "openai_vision", "reason": str(error)[:300]}
+
+
+def is_strict_visual_match(payload: dict[str, Any]) -> bool:
+    if not bool(payload.get("same_product")):
+        return False
+    if payload.get("zendrop_image_is_product_photo") is False:
+        return False
+    if float(payload.get("confidence") or 0) < VISION_PASS_CONFIDENCE:
+        return False
+    strict_keys = ("category_match", "silhouette_match", "color_match")
+    return all(payload.get(key) is not False for key in strict_keys)
 
 
 def score_zendrop_candidate(competitor_text: str, zendrop_name: str) -> float:
