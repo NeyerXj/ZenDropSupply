@@ -168,6 +168,18 @@ def get_pipeline_activity(database: sqlite3.Connection, limit: int = 20) -> dict
         """,
         (*ACTIVE_PIPELINE_STAGES, limit),
     ).fetchall()
+    done_rows = database.execute(
+        """
+        select id, run_id, stage, status, priority, payload_json, result_json, error_message,
+            created_at, updated_at, locked_at
+        from pipeline_jobs
+        where status = 'done'
+          and stage in ('approval_match_product', 'zendrop_search')
+        order by updated_at desc, id desc
+        limit ?
+        """,
+        (limit,),
+    ).fetchall()
     return {
         "summary": [
             {"stage": row[0], "status": row[1], "count": row[2]}
@@ -175,6 +187,7 @@ def get_pipeline_activity(database: sqlite3.Connection, limit: int = 20) -> dict
         ],
         "active_jobs": [serialize_pipeline_activity_job(row) for row in active_rows],
         "failed_jobs": [serialize_pipeline_activity_job(row) for row in failed_rows],
+        "recent_done_jobs": [serialize_pipeline_activity_job(row) for row in done_rows],
     }
 
 

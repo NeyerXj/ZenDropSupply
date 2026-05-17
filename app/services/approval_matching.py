@@ -65,6 +65,8 @@ ATTRIBUTE_WORDS = {
     "heels",
 }
 
+VISION_REVIEW_TEXT_SCORE = 84
+
 
 def build_approval_matches(
     database: sqlite3.Connection,
@@ -264,6 +266,7 @@ def choose_vision_verified_candidate(
     openai_settings: OpenAISettings | None,
     storage_dir: Path | None,
 ) -> tuple | None:
+    review_candidate: tuple | None = None
     for product_id, name, score, price_usd, shipping_price_usd, image_url, raw_json in candidates:
         for candidate_image_url in zendrop_product_image_urls(image_url=image_url, raw_json=raw_json):
             verdict = verify_visual_match(
@@ -277,6 +280,22 @@ def choose_vision_verified_candidate(
             if verdict["same_product"]:
                 visual_status = "vision_pass" if verdict["source"] == "openai_vision" else "text_only"
                 return product_id, name, score, price_usd, shipping_price_usd, candidate_image_url, visual_status
+            if (
+                review_candidate is None
+                and verdict.get("zendrop_image_is_product_photo") is not False
+                and score >= VISION_REVIEW_TEXT_SCORE
+            ):
+                review_candidate = (
+                    product_id,
+                    name,
+                    score,
+                    price_usd,
+                    shipping_price_usd,
+                    candidate_image_url,
+                    "vision_review",
+                )
+    if review_candidate is not None:
+        return review_candidate
     return None
 
 

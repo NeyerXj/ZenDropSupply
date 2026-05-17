@@ -117,6 +117,7 @@ function renderJobActivity() {
         ${failedTotal ? `<strong>${failedTotal} failed</strong>` : ""}
       </div>
       ${failedJobs.length ? renderJobList(failedJobs, "Recent failed jobs") : ""}
+      ${renderRecentMatchDiagnostics()}
     `;
     return;
   }
@@ -131,6 +132,33 @@ function renderJobActivity() {
     </div>
     <div class="job-list">
       ${jobs.map(renderJobRow).join("")}
+    </div>
+  `;
+}
+
+function renderRecentMatchDiagnostics() {
+  const jobs = (state.jobStatus.recent_done_jobs || [])
+    .filter((job) => job.stage === "approval_match_product")
+    .slice(0, 8);
+  if (!jobs.length) return "";
+  return `
+    <div class="job-list" aria-label="Recent match diagnostics">
+      ${jobs.map((job) => {
+        const diagnostics = job.result?.diagnostics || {};
+        const candidates = (diagnostics.candidates || [])
+          .map((candidate) => `${candidate.name} (${Math.round(candidate.score)})`)
+          .join(", ");
+        return `
+          <article class="job-row done">
+            <div>
+              <strong>${diagnostics.product_title || jobPayloadLabel(job) || "Match job"}</strong>
+              <span>${diagnostics.reason || "Match job completed"}</span>
+            </div>
+            ${diagnostics.selected_candidate ? `<small>${diagnostics.selected_candidate} · score ${Math.round(diagnostics.score || 0)}</small>` : ""}
+            ${candidates ? `<small>${candidates}</small>` : ""}
+          </article>
+        `;
+      }).join("")}
     </div>
   `;
 }

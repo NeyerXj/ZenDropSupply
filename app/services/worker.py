@@ -13,7 +13,7 @@ from app.providers.competitor_shopify import CompetitorShopifyClient
 from app.providers.gemini_images import GeminiImageClient
 from app.providers.openai_content import OpenAIContentClient
 from app.providers.zendrop import ZendropMcpClient
-from app.services.approval_matching import build_approval_matches, queue_approval_match_jobs
+from app.services.approval_matching import build_approval_matches, find_top_zendrop_matches, queue_approval_match_jobs
 from app.services.competitor_pipeline import CompetitorPipeline
 from app.services.filtering import get_active_filter_config
 from app.services.final_catalog import FinalCatalogService
@@ -145,6 +145,10 @@ class PipelineWorker:
                 openai_settings=self.settings.openai,
                 storage_dir=self.settings.storage_dir,
                 competitor_product_ids=[int(payload["competitor_product_id"])],
+            )
+            result["diagnostics"] = approval_match_diagnostics(
+                database=database,
+                competitor_product_id=int(payload["competitor_product_id"]),
             )
         return result
 
@@ -315,6 +319,61 @@ def build_image_prompt(payload: dict[str, Any]) -> str:
         f"Create a premium boutique product photo for {title}. "
         "Use a clean studio look, 4:3 composition, 2K output, natural fabric detail, no text overlays."
     )
+
+
+def approval_match_diagnostics(database, competitor_product_id: int) -> dict[str, Any]:
+    product_row = database.execute(
+        "select title from competitor_products where id = ?",
+        (competitor_product_id,),
+    ).fetchone()
+    if product_row is None:
+        return {"reason": "Source product no longer exists"}
+    match_row = database.execute(
+        """
+        select pm.visual_status, zp.name, pm.zendrop_match_score
+        from product_matches pm
+        join zendrop_products zp on zp.product_id = pm.zendrop_product_id
+        where pm.competitor_product_id = ? and pm.status in ('approval_pending', 'approved')
+        order by pm.updated_at desc, pm.id desc
+        limit 1
+        """,
+        (competitor_product_id,),
+    ).fetchone()
+    if match_row:
+        return {
+            "product_title": product_row[0],
+            "reason": f"Preview card created as {match_row[0]}",
+            "selected_candidate": match_row[1],
+            "score": match_row[2],
+        }
+    zendrop_rows = database.execute(
+        """
+        select product_id, name, price_usd, shipping_price_usd, image_url, raw_json
+        from zendrop_products
+        order by updated_at desc, product_id desc
+        """
+    ).fetchall()
+    candidates = find_top_zendrop_matches(
+        search_text=zendrop_search_text(product_row[0]),
+        zendrop_rows=zendrop_rows,
+        min_score=0,
+        excluded_product_ids=set(),
+        limit=3,
+    )
+    if not candidates:
+        return {
+            "product_title": product_row[0],
+            "reason": "No Zendrop text candidates passed category and score filters",
+            "candidates": [],
+        }
+    return {
+        "product_title": product_row[0],
+        "reason": "Text candidates existed, but AI Vision did not pass and text score was below review threshold",
+        "candidates": [
+            {"product_id": row[0], "name": row[1], "score": row[2]}
+            for row in candidates
+        ],
+    }
 
 
 async def run_worker(settings: Settings, once: bool = False, poll_seconds: float = 2.0) -> None:

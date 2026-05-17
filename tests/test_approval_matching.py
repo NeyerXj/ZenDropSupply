@@ -133,6 +133,69 @@ def test_build_approval_matches_skips_zendrop_size_chart_image(tmp_path, monkeyp
     assert cards[0]["zendrop"]["image_url"] == "https://file.zendrop.com/product.webp"
 
 
+def test_build_approval_matches_creates_review_card_for_high_text_score_when_vision_rejects(tmp_path, monkeypatch):
+    database_url = f"sqlite:///{tmp_path / 'pipeline.db'}"
+    image_path = tmp_path / "storage" / "competitor_images" / "dress.jpg"
+    image_path.parent.mkdir(parents=True)
+    image_path.write_bytes(b"image")
+
+    def fake_visual_match(**kwargs):
+        return {
+            "same_product": False,
+            "confidence": 0.41,
+            "source": "openai_vision",
+            "zendrop_image_is_product_photo": True,
+            "reason": "Needs manual review",
+        }
+
+    monkeypatch.setattr(approval_matching, "verify_visual_match", fake_visual_match)
+
+    with open_database(database_url) as database:
+        database.execute(
+            """
+            insert into competitor_products (
+                store_url, handle, title, price, image_path, tags_json, status, raw_json
+            )
+            values (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "https://example.com",
+                "halter-maxi-dress",
+                "Halter Neck Mesh Maxi Dress",
+                79.0,
+                str(image_path),
+                "[]",
+                "ready_for_zendrop",
+                "{}",
+            ),
+        )
+        database.execute(
+            """
+            insert into zendrop_products (
+                product_id, name, price_usd, image_url, raw_json, shipping_country_code, shipping_price_usd
+            )
+            values (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                3130392,
+                "Halter Neck Mesh Maxi Dress",
+                6.06,
+                "https://file.zendrop.com/product.webp",
+                json.dumps({"images": [{"url": "https://file.zendrop.com/product.webp"}]}),
+                "ca",
+                6.29,
+            ),
+        )
+        database.commit()
+
+        result = build_approval_matches(database=database, min_score=50)
+        cards = list_approval_cards(database=database, storage_dir=tmp_path / "storage")
+
+    assert result == {"matches_created": 1}
+    assert cards[0]["zendrop"]["product_id"] == 3130392
+    assert cards[0]["visual_status"] == "vision_review"
+
+
 def test_build_approval_matches_uses_zendrop_only(tmp_path):
     database_url = f"sqlite:///{tmp_path / 'pipeline.db'}"
     with open_database(database_url) as database:
