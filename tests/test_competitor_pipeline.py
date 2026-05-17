@@ -53,3 +53,72 @@ async def test_competitor_pipeline_persists_product_and_image(tmp_path):
     assert rows[0][2] == "Floral Maxi Dress"
     assert rows[0][3] == "ready_for_zendrop"
     assert (tmp_path / "competitor_images" / "floral-maxi-dress.jpg").read_bytes() == b"image-bytes"
+
+
+@pytest.mark.asyncio
+async def test_competitor_pipeline_limit_counts_ready_products_after_filters(tmp_path):
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/collections/all":
+            return httpx.Response(
+                200,
+                text=(
+                    '<a href="/products/mens-jacket">Mens Jacket</a>'
+                    '<a href="/products/floral-maxi-dress">Dress</a>'
+                    '<a href="/products/second-dress">Second Dress</a>'
+                ),
+            )
+        if request.url.path == "/products/mens-jacket.json":
+            return httpx.Response(
+                200,
+                json={
+                    "product": {
+                        "id": 11,
+                        "handle": "mens-jacket",
+                        "title": "Mens Jacket",
+                        "product_type": "Jackets",
+                        "tags": ["Men"],
+                        "image": None,
+                        "variants": [{"price": "49.99"}],
+                    }
+                },
+            )
+        if request.url.path == "/products/floral-maxi-dress.json":
+            return httpx.Response(
+                200,
+                json={
+                    "product": {
+                        "id": 12,
+                        "handle": "floral-maxi-dress",
+                        "title": "Floral Maxi Dress",
+                        "product_type": "Dresses",
+                        "tags": ["Women", "Summer"],
+                        "image": None,
+                        "variants": [{"price": "59.99"}],
+                    }
+                },
+            )
+        if request.url.path == "/products/second-dress.json":
+            raise AssertionError("Scraper should stop after one ready product")
+        raise AssertionError(f"Unexpected URL: {request.url}")
+
+    settings = Settings(database_url=f"sqlite:///{tmp_path / 'pipeline.db'}")
+
+    async with open_database(settings.database_url) as database:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+            client = CompetitorShopifyClient(http_client=http_client)
+            pipeline = CompetitorPipeline(
+                database=database,
+                client=client,
+                image_storage_dir=tmp_path / "competitor_images",
+            )
+            products = await pipeline.scrape_store("https://example.com", pages=1, limit=1)
+
+        rows = database.execute(
+            "select handle, status from competitor_products order by id"
+        ).fetchall()
+
+    assert len(products) == 2
+    assert rows == [
+        ("mens-jacket", "skipped_male"),
+        ("floral-maxi-dress", "ready_for_zendrop"),
+    ]

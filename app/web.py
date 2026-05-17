@@ -299,7 +299,7 @@ DASHBOARD_HTML = """<!doctype html>
           <label>Shopify stores<textarea name="store_urls" rows="5" placeholder="velanora-fashion.com&#10;lozendafashion.com"></textarea></label>
           <div class="field-row">
             <label>Pages per store<input name="pages_requested" type="number" value="5" min="1" max="20"></label>
-            <label>Product limit<input name="limit" type="number" value="120" min="1" max="200"></label>
+            <label>Ready product target<input name="limit" type="number" value="120" min="1" max="200"></label>
           </div>
           <label>HTML/TXT files<input id="analyticsFiles" name="analytics_files" type="file" accept=".html,.htm,.txt" multiple></label>
           <div class="filter-grid">

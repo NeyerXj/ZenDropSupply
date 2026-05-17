@@ -26,6 +26,7 @@ class CompetitorPipeline:
 
     async def scrape_store(self, store_url: str, pages: int, limit: int | None = None) -> list[CompetitorProduct]:
         products: list[CompetitorProduct] = []
+        ready_products_count = 0
         seen_handles: set[str] = set()
         for page in range(1, pages + 1):
             handles = await self.client.fetch_collection_handles(store_url=store_url, page=page)
@@ -35,9 +36,11 @@ class CompetitorPipeline:
                 seen_handles.add(handle)
                 product = await self.client.fetch_product(store_url=store_url, handle=handle)
                 image_path = await self._download_image(product)
-                self._persist_product(store_url=store_url, product=product, image_path=image_path)
+                status = self._persist_product(store_url=store_url, product=product, image_path=image_path)
                 products.append(product)
-                if limit is not None and len(products) >= limit:
+                if status == "ready_for_zendrop":
+                    ready_products_count += 1
+                if limit is not None and ready_products_count >= limit:
                     self.database.commit()
                     return products
         self.database.commit()
@@ -54,7 +57,8 @@ class CompetitorPipeline:
         image_path.write_bytes(response.content)
         return str(image_path)
 
-    def _persist_product(self, store_url: str, product: CompetitorProduct, image_path: str | None) -> None:
+    def _persist_product(self, store_url: str, product: CompetitorProduct, image_path: str | None) -> str:
+        status = classify_product_status(product, config=self.filter_config)
         self.database.execute(
             """
             insert into competitor_products (
@@ -94,7 +98,8 @@ class CompetitorPipeline:
                 product.price,
                 product.image_url,
                 image_path,
-                classify_product_status(product, config=self.filter_config),
+                status,
                 json.dumps(product.raw, ensure_ascii=False),
             ),
         )
+        return status
