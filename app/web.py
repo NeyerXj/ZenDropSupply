@@ -286,25 +286,34 @@ DASHBOARD_HTML = """<!doctype html>
       </section>
 
       <section class="stage-section">
+        <div class="lane-heading">
+          <div>
+            <h3>2. Source products</h3>
+            <p>Collected competitor products. Only ready products move into Zendrop search and AI match.</p>
+          </div>
+          <div id="sourceBreakdown" class="lane-stats"></div>
+        </div>
+        <section id="competitorProducts" class="product-list source-list" aria-label="Collected source products"></section>
+      </section>
+
+      <section class="stage-section">
         <div>
-          <h3>2. Match preview and approval</h3>
+          <h3>3. Match preview and approval</h3>
           <p>Each card compares competitor and Zendrop before generation starts.</p>
         </div>
         <section id="approvalCards" class="approval-grid" aria-label="Approval cards"></section>
       </section>
 
       <section class="stage-section">
-        <div>
-          <h3>3. Final Shopify drafts</h3>
-          <p>Only approved products should move into content, images, and Shopify draft upload.</p>
+        <div class="lane-heading">
+          <div>
+            <h3>4. Approved production</h3>
+            <p>Only approved products appear here. Image enhancer uses fake images in test mode.</p>
+          </div>
+          <button id="uploadDraftsButton" type="button" class="secondary">Upload drafts</button>
         </div>
         <section id="finalCatalog" class="final-catalog" aria-label="Final Shopify products"></section>
       </section>
-
-      <details class="raw-details">
-        <summary>Raw collected products</summary>
-        <div class="product-list" id="competitorProducts"></div>
-      </details>
     </main>
   </div>
   <script src="/assets/dashboard.js"></script>

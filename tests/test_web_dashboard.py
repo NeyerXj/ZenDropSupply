@@ -407,6 +407,43 @@ def test_dashboard_rejects_card_and_cancels_pending_approval_work(tmp_path):
     assert retry_jobs == 1
 
 
+def test_dashboard_v2_final_catalog_hides_unapproved_products(tmp_path):
+    settings = Settings(database_url=f"sqlite:///{tmp_path / 'pipeline.db'}", storage_dir=tmp_path / "storage")
+    with open_database(settings.database_url) as database:
+        database.execute(
+            """
+            insert into competitor_products (store_url, handle, title, tags_json, status, raw_json)
+            values
+                ('https://example.com', 'raw-dress', 'Raw Dress', '[]', 'ready_for_zendrop', '{}'),
+                ('https://example.com', 'approved-dress', 'Approved Dress', '[]', 'ready_for_zendrop', '{}')
+            """
+        )
+        approved_product_id = database.execute(
+            "select id from competitor_products where handle = 'approved-dress'"
+        ).fetchone()[0]
+        database.execute(
+            "insert into zendrop_products (product_id, name, raw_json) values (2331830, 'Approved Dress', '{}')"
+        )
+        database.execute(
+            """
+            insert into product_matches (
+                competitor_product_id, zendrop_product_id, zendrop_match_score, status
+            )
+            values (?, 2331830, 90, 'approved')
+            """,
+            (approved_product_id,),
+        )
+        database.commit()
+
+    client = authenticated_client(settings)
+
+    response = client.get("/api/final-catalog")
+
+    assert response.status_code == 200
+    products = response.json()["products"]
+    assert [product["title"] for product in products] == ["Approved Dress"]
+
+
 def test_zendrop_run_requires_api_token(tmp_path):
     settings = Settings(
         database_url=f"sqlite:///{tmp_path / 'pipeline.db'}",

@@ -184,9 +184,12 @@ class PipelineWorker:
             enqueue_pipeline_job(
                 database=database,
                 run_id=job["run_id"],
-                stage="gemini_images",
-                payload={"product_match_id": payload["product_match_id"]},
-                priority=210,
+                stage="final_model_images",
+                payload={
+                    "competitor_product_id": match_payload["competitor_product_id"],
+                    "images_per_product": 6,
+                },
+                priority=300,
             )
             database.commit()
         return {"content_generated": 1, "product_match_id": payload["product_match_id"]}
@@ -243,7 +246,7 @@ class PipelineWorker:
             row = database.execute(
                 """
                 select
-                    pm.id, pm.total_cost_usd, cp.title, cp.price, zp.name, zp.price_usd, zp.shipping_price_usd
+                    pm.id, pm.total_cost_usd, cp.id, cp.title, cp.price, zp.name, zp.price_usd, zp.shipping_price_usd
                 from product_matches pm
                 join competitor_products cp on cp.id = pm.competitor_product_id
                 join zendrop_products zp on zp.product_id = pm.zendrop_product_id
@@ -256,12 +259,13 @@ class PipelineWorker:
         return {
             "product_match_id": row[0],
             "total_cost_usd": row[1],
-            "competitor_title": row[2],
-            "competitor_price_usd": row[3],
-            "supplier_title": row[4],
-            "zendrop_name": row[4],
-            "zendrop_price_usd": row[5],
-            "zendrop_shipping_usd": row[6],
+            "competitor_product_id": row[2],
+            "competitor_title": row[3],
+            "competitor_price_usd": row[4],
+            "supplier_title": row[5],
+            "zendrop_name": row[5],
+            "zendrop_price_usd": row[6],
+            "zendrop_shipping_usd": row[7],
         }
 
     def _load_image_payload(self, product_match_id: int) -> dict[str, Any]:

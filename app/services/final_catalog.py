@@ -33,6 +33,7 @@ def list_final_catalog_status(database, storage_dir: Path, limit: int = 20) -> l
             coalesce(sdp.status, '') as shopify_status,
             coalesce(sdp.media_count, 0) as media_count
         from competitor_products cp
+        join product_matches pm on pm.competitor_product_id = cp.id and pm.status = 'approved'
         left join final_image_sets fis on fis.competitor_product_id = cp.id
         left join final_generated_images fgi on fgi.image_set_id = fis.id
         left join shopify_draft_products sdp on sdp.competitor_product_id = cp.id

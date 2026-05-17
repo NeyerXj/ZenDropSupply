@@ -287,6 +287,21 @@ button:disabled {
   margin: 4px 0 0;
 }
 
+.lane-heading {
+  align-items: start;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.lane-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+  max-width: 560px;
+}
+
 .filter-grid {
   display: grid;
   gap: 10px;
@@ -526,7 +541,7 @@ button:disabled {
 .approval-images {
   display: grid;
   gap: 8px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .approval-images figure {
@@ -882,9 +897,14 @@ textarea:focus {
 
   .topbar,
   .queue-toolbar,
-  .approval-toolbar {
+  .approval-toolbar,
+  .lane-heading {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .lane-stats {
+    justify-content: stretch;
   }
 
   .toolbar-actions {

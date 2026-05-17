@@ -2,6 +2,7 @@ import pytest
 
 from app.config import Settings
 from app.database import open_database
+from app.providers.openai_content import GeneratedProductContent, OpenAIContentClient
 from app.services.pipeline_state import claim_next_pipeline_job, complete_pipeline_job, create_competitor_batch_run, enqueue_pipeline_job
 from app.services.worker import PipelineWorker
 
@@ -69,3 +70,51 @@ async def test_worker_process_next_job_marks_failed_dispatch(tmp_path, monkeypat
 
     assert job["status"] == "failed"
     assert job["error_message"] == "provider failed"
+
+
+@pytest.mark.asyncio
+async def test_openai_content_job_queues_final_model_images_for_approved_product(tmp_path, monkeypatch):
+    settings = Settings(database_url=f"sqlite:///{tmp_path / 'pipeline.db'}")
+    with open_database(settings.database_url) as database:
+        database.execute(
+            """
+            insert into competitor_products (store_url, handle, title, tags_json, status, raw_json)
+            values ('https://example.com', 'dress', 'Floral Dress', '[]', 'ready_for_zendrop', '{}')
+            """
+        )
+        competitor_product_id = database.execute("select id from competitor_products").fetchone()[0]
+        database.execute("insert into zendrop_products (product_id, name, raw_json) values (42, 'Zendrop Dress', '{}')")
+        database.execute(
+            """
+            insert into product_matches (
+                competitor_product_id, zendrop_product_id, zendrop_match_score, status, total_cost_usd
+            )
+            values (?, 42, 92, 'approved', 12.0)
+            """,
+            (competitor_product_id,),
+        )
+        product_match_id = database.execute("select id from product_matches").fetchone()[0]
+        database.commit()
+
+    async def fake_generate_product_content(self, payload):
+        return GeneratedProductContent(
+            title="Ava Floral Dress",
+            description="Premium description",
+            size_chart={},
+            price_usd=39.0,
+            compare_at_price_usd=55.0,
+            raw={"mode": "fake"},
+        )
+
+    monkeypatch.setattr(OpenAIContentClient, "generate_product_content", fake_generate_product_content)
+
+    worker = PipelineWorker(settings=settings)
+    await worker.run_openai_content({"id": 10, "run_id": 77}, {"product_match_id": product_match_id})
+
+    with open_database(settings.database_url) as database:
+        jobs = database.execute(
+            "select stage, payload_json from pipeline_jobs where stage = 'final_model_images'"
+        ).fetchall()
+
+    assert len(jobs) == 1
+    assert str(competitor_product_id) in jobs[0][1]

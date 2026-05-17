@@ -61,6 +61,19 @@ function renderSummary() {
   `).join("");
 }
 
+function renderSourceBreakdown() {
+  const target = document.getElementById("sourceBreakdown");
+  const counts = state.summary.status_counts || {};
+  const entries = Object.entries(counts).sort((left, right) => String(left[0]).localeCompare(String(right[0])));
+  if (!entries.length) {
+    target.innerHTML = "";
+    return;
+  }
+  target.innerHTML = entries.map(([status, count]) => `
+    <span class="status-pill ${status}">${status}: ${count}</span>
+  `).join("");
+}
+
 function renderPipeline(steps) {
   document.getElementById("pipelineSteps").innerHTML = steps.map((step) => `
     <div class="pipeline-step ${step.state}">
@@ -169,7 +182,7 @@ function jobPayloadLabel(job) {
 function renderApprovalCards() {
   const target = document.getElementById("approvalCards");
   if (!state.approvalCards.length) {
-    target.innerHTML = `<div class="empty-state">No match preview yet. Run sourcing first, then build preview from the next action panel.</div>`;
+    target.innerHTML = `<div class="empty-state">No match preview cards yet. Ready source products must pass Zendrop search and AI image match before approval.</div>`;
     return;
   }
   target.innerHTML = state.approvalCards.map((card) => {
@@ -217,8 +230,13 @@ function approvalImage(src, label) {
 
 function renderFinalCatalog() {
   const target = document.getElementById("finalCatalog");
+  const uploadButton = document.getElementById("uploadDraftsButton");
+  const readyForUpload = state.finalProducts.filter((product) =>
+    product.image_status === "ready" && Number(product.generated_count || 0) >= 5 && Number(product.media_count || 0) < 5
+  );
+  uploadButton.disabled = readyForUpload.length === 0;
   if (!state.finalProducts.length) {
-    target.innerHTML = `<div class="empty-state">No final products yet.</div>`;
+    target.innerHTML = `<div class="empty-state">No approved products yet. Approve a match card first; then enhancer prepares fake model images.</div>`;
     return;
   }
   target.innerHTML = state.finalProducts.map((product) => `
@@ -237,8 +255,9 @@ function renderFinalCatalog() {
 
 function renderCompetitorProducts() {
   const target = document.getElementById("competitorProducts");
+  renderSourceBreakdown();
   if (!state.competitorProducts.length) {
-    target.innerHTML = `<div class="empty-state">No raw products loaded.</div>`;
+    target.innerHTML = `<div class="empty-state">No source products loaded. Start sourcing from a Shopify store or uploaded file.</div>`;
     return;
   }
   target.innerHTML = state.competitorProducts.map((product) => `
@@ -246,7 +265,7 @@ function renderCompetitorProducts() {
       <img class="product-thumb" src="${product.image_url || ""}" alt="" onerror="this.style.visibility='hidden'">
       <div class="product-info">
         <h4 class="product-title">${product.title}</h4>
-        <div class="product-meta">${product.handle}</div>
+        <div class="product-meta">${product.store_url} · ${product.handle}</div>
         <div class="product-meta">${product.product_type || "No type"} · ${money(product.price)}</div>
       </div>
       <span class="status-pill ${product.status}">${product.status}</span>
@@ -264,6 +283,7 @@ function renderNextAction() {
   const finalReady = readyProducts.length;
   const uploaded = readyProducts.filter((product) => Number(product.media_count || 0) >= 5).length;
   const approvedCards = state.approvalCards.filter((card) => card.status === "approved").length;
+  const pendingCards = state.approvalCards.filter((card) => card.status === "approval_pending").length;
   const activeJobs = state.jobStatus.active_jobs || [];
   const runningJobs = activeJobs.filter((job) => job.status === "running");
   const queuedJobs = activeJobs.filter((job) => job.status === "queued");
@@ -289,32 +309,39 @@ function renderNextAction() {
     button.dataset.action = "start";
     return;
   }
-  if (!state.approvalCards.length) {
+  if (!state.approvalCards.length && (state.summary.ready_for_zendrop || 0) > 0) {
     title.textContent = "Build match preview";
-    description.textContent = "Create competitor and Zendrop comparison cards.";
+    description.textContent = "Queue Zendrop plus AI image matching for ready source products.";
     button.textContent = "Build preview";
     button.dataset.action = "preview";
     return;
   }
-  if (approvedCards === 0) {
-    title.textContent = "Approve products";
-    description.textContent = "Review match cards and approve only products that should move to content and image generation.";
+  if (!state.approvalCards.length) {
+    title.textContent = "No visible matches";
+    description.textContent = "Sourcing finished, but filters or AI matching did not produce approval cards. Check source products below.";
     button.textContent = "Refresh state";
     button.dataset.action = "refresh";
     return;
   }
-  if (finalReady < Math.min(10, approvedCards)) {
-    title.textContent = "Generate approved product assets";
-    description.textContent = "Create product content and 5–6 consistent model photos before Shopify upload.";
-    button.textContent = "Generate model photo sets";
+  if (pendingCards > 0) {
+    title.textContent = "Approve products";
+    description.textContent = "Approve, skip, or reject visible match cards. Only approved cards move forward.";
+    button.textContent = "Refresh state";
+    button.dataset.action = "refresh";
+    return;
+  }
+  if (approvedCards > 0 && finalReady < approvedCards) {
+    title.textContent = "Prepare approved products";
+    description.textContent = "Product enhancer and fake image enhancer run only after approval. Retry if no jobs are active.";
+    button.textContent = "Retry image enhancer";
     button.dataset.action = "images";
     return;
   }
   if (uploaded < finalReady) {
     title.textContent = "Upload Shopify drafts";
     description.textContent = "Create Shopify products as DRAFT only. No automatic publishing.";
-    button.textContent = "Push draft products";
-    button.dataset.action = "shopify";
+    button.textContent = "Use Upload drafts";
+    button.dataset.action = "refresh";
     return;
   }
   title.textContent = "Pipeline complete";
@@ -461,18 +488,31 @@ async function runNextAction() {
         body: JSON.stringify({ limit: 10, images_per_product: 6 }),
       });
       showToast(`Model photo jobs queued: ${result.jobs_queued}.`);
-    } else if (button.dataset.action === "shopify") {
-      const result = await fetchJson("/api/run/shopify-drafts", {
-        method: "POST",
-        body: JSON.stringify({ limit: 10, min_images: 5 }),
-      });
-      showToast(`Shopify draft jobs queued: ${result.jobs_queued}.`);
     }
     await loadState();
   } catch (error) {
     showToast(error.message);
   } finally {
     button.disabled = false;
+    button.textContent = previousText;
+  }
+}
+
+async function uploadDrafts() {
+  const button = document.getElementById("uploadDraftsButton");
+  const previousText = button.textContent;
+  try {
+    button.disabled = true;
+    button.textContent = "Queueing...";
+    const result = await fetchJson("/api/run/shopify-drafts", {
+      method: "POST",
+      body: JSON.stringify({ limit: 10, min_images: 5 }),
+    });
+    showToast(`Shopify draft jobs queued: ${result.jobs_queued}.`);
+    await loadState();
+  } catch (error) {
+    showToast(error.message);
+  } finally {
     button.textContent = previousText;
   }
 }
@@ -505,6 +545,7 @@ async function updateApprovalStatus(productMatchId, status) {
 
 document.getElementById("sourceSetupForm").addEventListener("submit", submitSourceSetup);
 document.getElementById("nextActionButton").addEventListener("click", runNextAction);
+document.getElementById("uploadDraftsButton").addEventListener("click", uploadDrafts);
 
 Promise.all([loadFilterConfig(), loadState()]).catch((error) => showToast(error.message));
 

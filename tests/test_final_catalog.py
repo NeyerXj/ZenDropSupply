@@ -67,6 +67,7 @@ def test_final_catalog_status_reports_generated_images_and_shopify_media(tmp_pat
 
     with open_database(database_url) as database:
         product_id = insert_competitor_product(database, image_path=str(source_image))
+        approve_product(database, product_id)
         image_set_id = database.execute(
             """
             insert into final_image_sets (competitor_product_id, target_count, status, generated_count)
@@ -111,6 +112,22 @@ def test_final_catalog_status_reports_generated_images_and_shopify_media(tmp_pat
             "media_count": 6,
         }
     ]
+
+
+def test_final_catalog_status_hides_unapproved_source_products(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'pipeline.db'}"
+    storage_dir = tmp_path / "storage"
+
+    with open_database(database_url) as database:
+        visible_product_id = insert_competitor_product(database, title="Approved Dress")
+        hidden_product_id = insert_competitor_product(database, title="Raw Dress")
+        approve_product(database, visible_product_id)
+        database.commit()
+
+        products = list_final_catalog_status(database=database, storage_dir=storage_dir, limit=10)
+
+    assert [product["competitor_product_id"] for product in products] == [visible_product_id]
+    assert hidden_product_id not in [product["competitor_product_id"] for product in products]
 
 
 def test_queue_final_image_jobs_skips_products_with_enough_images_or_running_job(tmp_path):
