@@ -36,6 +36,7 @@ from app.services.pipeline_state import (
     list_pipeline_jobs,
     list_pipeline_runs,
 )
+from app.services.search_terms import zendrop_search_queries, zendrop_search_text
 from app.services.zendrop_pipeline import ZendropPipeline
 
 
@@ -621,9 +622,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 run_id=None,
                 stage="zendrop_search",
                 payload={
-                    "keyword": product["title"],
+                    "keyword": zendrop_search_text(product["title"]),
+                    "keywords": zendrop_search_queries(product["title"]),
                     "competitor_product_id": product_id,
-                    "limit": 5,
+                    "limit": 8,
                     "country_code": app_settings.zendrop.default_country_code,
                 },
                 priority=120,

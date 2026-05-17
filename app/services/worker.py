@@ -24,7 +24,7 @@ from app.services.pipeline_state import (
     fail_pipeline_job,
     update_pipeline_run_status,
 )
-from app.services.search_terms import zendrop_search_text
+from app.services.search_terms import zendrop_search_queries, zendrop_search_text
 from app.services.zendrop_pipeline import ZendropPipeline
 
 
@@ -101,9 +101,10 @@ class PipelineWorker:
                         stage="zendrop_search",
                         payload={
                             "keyword": zendrop_search_text(title),
+                            "keywords": zendrop_search_queries(title),
                             "competitor_product_id": product_id,
                             "source_title": title,
-                            "limit": 5,
+                            "limit": 8,
                             "country_code": self.settings.zendrop.default_country_code,
                         },
                         priority=110,
@@ -115,11 +116,16 @@ class PipelineWorker:
             client = ZendropMcpClient(settings=self.settings.zendrop, http_client=http_client)
             with open_database(self.settings.database_url) as database:
                 pipeline = ZendropPipeline(database=database, zendrop_client=client)
-                products = await pipeline.search_and_store(
-                    keyword=payload["keyword"],
-                    limit=int(payload.get("limit") or 5),
-                    country_code=payload.get("country_code") or self.settings.zendrop.default_country_code,
-                )
+                products = []
+                keywords = payload.get("keywords") or [payload["keyword"]]
+                for keyword in keywords:
+                    products.extend(
+                        await pipeline.search_and_store(
+                            keyword=keyword,
+                            limit=int(payload.get("limit") or 8),
+                            country_code=payload.get("country_code") or self.settings.zendrop.default_country_code,
+                        )
+                    )
                 competitor_product_id = payload.get("competitor_product_id")
                 if competitor_product_id:
                     enqueue_pipeline_job(
@@ -131,7 +137,7 @@ class PipelineWorker:
                     )
                 else:
                     queue_approval_match_jobs(database=database, run_id=job["run_id"])
-        return {"products_saved": len(products), "keyword": payload["keyword"]}
+        return {"products_saved": len({product.product_id for product in products}), "keywords": keywords}
 
     async def run_approval_matching(self, job: dict, payload: dict[str, Any]) -> dict[str, Any]:
         with open_database(self.settings.database_url) as database:
