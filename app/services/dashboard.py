@@ -37,6 +37,12 @@ def get_summary(database: sqlite3.Connection) -> dict:
     vision_rejected_total = database.execute(
         "select count(*) from product_matches where status = 'rejected' and visual_status = 'vision_rejected'"
     ).fetchone()[0]
+    vision_review_total = database.execute(
+        "select count(*) from product_matches where status = 'approval_pending' and visual_status = 'vision_review'"
+    ).fetchone()[0]
+    vision_pass_total = database.execute(
+        "select count(*) from product_matches where status in ('approval_pending', 'approved') and visual_status = 'vision_pass'"
+    ).fetchone()[0]
     match_jobs_done_total = database.execute(
         "select count(*) from pipeline_jobs where stage = 'approval_match_product' and status = 'done'"
     ).fetchone()[0]
@@ -53,6 +59,8 @@ def get_summary(database: sqlite3.Connection) -> dict:
     return {
         "preview_cards_total": preview_cards_total,
         "vision_rejected_total": vision_rejected_total,
+        "vision_review_total": vision_review_total,
+        "vision_pass_total": vision_pass_total,
         "match_jobs_done_total": match_jobs_done_total,
         "match_jobs_active_total": match_jobs_active_total,
         "competitor_total": competitor_total,

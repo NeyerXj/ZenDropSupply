@@ -28,8 +28,13 @@ class CompetitorPipeline:
         products: list[CompetitorProduct] = []
         ready_products_count = 0
         seen_handles: set[str] = set()
-        for page in range(1, pages + 1):
+        page = 1
+        max_pages = max(pages, 50) if limit is not None else pages
+        while page <= max_pages:
             handles = await self.client.fetch_collection_handles(store_url=store_url, page=page)
+            new_handles = [handle for handle in handles if handle not in seen_handles]
+            if not new_handles and page > pages:
+                break
             for handle in handles:
                 if handle in seen_handles:
                     continue
@@ -43,6 +48,9 @@ class CompetitorPipeline:
                 if limit is not None and ready_products_count >= limit:
                     self.database.commit()
                     return products
+            if not handles:
+                break
+            page += 1
         self.database.commit()
         return products
 

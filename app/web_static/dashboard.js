@@ -68,7 +68,10 @@ function metricHint(key) {
   const active = Number(state.summary.match_jobs_active_total || 0);
   const done = Number(state.summary.match_jobs_done_total || 0);
   const rejected = Number(state.summary.vision_rejected_total || 0);
+  const review = Number(state.summary.vision_review_total || 0);
+  const pass = Number(state.summary.vision_pass_total || 0);
   if (active > 0) return `<div class="metric-hint">${active} matching now</div>`;
+  if (pass || review) return `<div class="metric-hint">${pass} pass · ${review} review</div>`;
   if (rejected > 0) return `<div class="metric-hint">${rejected} vision rejected</div>`;
   if (done > 0) return `<div class="metric-hint">${done} checked</div>`;
   return "";
@@ -245,7 +248,8 @@ function renderApprovalCards() {
           <span class="status-pill ${card.status}">${card.status}</span>
           <span>Competitor ${money(card.competitor.price)}</span>
           <span>Zendrop ${money(card.zendrop.price_usd)} + ship ${money(card.zendrop.shipping_price_usd)} = ${money(card.zendrop.total_cost_usd)}</span>
-          <span>Text match ${Math.round(card.zendrop_match_score)} · ${card.visual_status}</span>
+          <span>Text match ${Math.round(card.zendrop_match_score)} · ${visionLabel(card)}</span>
+          ${card.vision_reason ? `<span>${card.vision_reason}</span>` : ""}
         </div>
         <div class="approval-actions">
           <button type="button" data-approval-action="approved" data-match-id="${card.id}" ${card.status === "approved" ? "disabled" : ""}>Approve</button>
@@ -260,6 +264,13 @@ function renderApprovalCards() {
   target.querySelectorAll("[data-approval-action]").forEach((button) => {
     button.addEventListener("click", () => updateApprovalStatus(button.dataset.matchId, button.dataset.approvalAction));
   });
+}
+
+function visionLabel(card) {
+  if (card.vision_confidence === null || card.vision_confidence === undefined) {
+    return card.visual_status;
+  }
+  return `${card.visual_status} ${Math.round(Number(card.vision_confidence) * 100)}%`;
 }
 
 function approvalImage(src, label) {

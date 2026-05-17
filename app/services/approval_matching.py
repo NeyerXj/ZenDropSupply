@@ -65,7 +65,8 @@ ATTRIBUTE_WORDS = {
     "heels",
 }
 
-VISION_PASS_CONFIDENCE = 0.80
+VISION_PASS_CONFIDENCE = 0.75
+VISION_REVIEW_CONFIDENCE = 0.60
 
 
 def build_approval_matches(
@@ -228,7 +229,18 @@ def build_zendrop_only_matches(
         store_rejected_candidates(database, competitor_product_id, rejected_candidates)
         if candidate is None:
             continue
-        zendrop_product_id, _name, score, price_usd, shipping_price_usd, selected_image_url, visual_status = candidate
+        (
+            zendrop_product_id,
+            _name,
+            score,
+            price_usd,
+            shipping_price_usd,
+            selected_image_url,
+            visual_status,
+            vision_confidence,
+            vision_reason,
+            vision_verdict,
+        ) = candidate
         total_cost = (price_usd or 0) + (shipping_price_usd or 0)
         database.execute(
             """
@@ -245,13 +257,25 @@ def build_zendrop_only_matches(
                 zendrop_product_id,
                 zendrop_match_score,
                 visual_status,
+                vision_confidence,
+                vision_reason,
+                vision_verdict_json,
                 total_cost_usd,
                 status,
                 updated_at
             )
-            values (?, ?, ?, ?, ?, 'approval_pending', current_timestamp)
+            values (?, ?, ?, ?, ?, ?, ?, ?, 'approval_pending', current_timestamp)
             """,
-            (competitor_product_id, zendrop_product_id, score, visual_status, total_cost),
+            (
+                competitor_product_id,
+                zendrop_product_id,
+                score,
+                visual_status,
+                vision_confidence,
+                vision_reason,
+                json.dumps(vision_verdict, ensure_ascii=False),
+                total_cost,
+            ),
         )
         matches_created += 1
     return matches_created
@@ -309,8 +333,8 @@ def choose_vision_verified_candidate(
                 zendrop_image_url=candidate_image_url,
                 openai_settings=openai_settings,
             )
-            if verdict["same_product"]:
-                visual_status = "vision_pass" if verdict["source"] == "openai_vision" else "text_only"
+            visual_status = classify_visual_verdict(verdict)
+            if visual_status:
                 return (
                     product_id,
                     name,
@@ -319,6 +343,9 @@ def choose_vision_verified_candidate(
                     shipping_price_usd,
                     candidate_image_url,
                     visual_status,
+                    verdict_confidence(verdict),
+                    verdict.get("reason"),
+                    verdict,
                 ), rejected_candidates
             product_rejected = True
         if product_rejected:
@@ -329,6 +356,9 @@ def choose_vision_verified_candidate(
                     "price_usd": price_usd,
                     "shipping_price_usd": shipping_price_usd,
                     "image_url": image_url,
+                    "vision_confidence": verdict_confidence(verdict),
+                    "vision_reason": verdict.get("reason"),
+                    "vision_verdict": verdict,
                     "reason": "AI Vision rejected this Zendrop candidate for the current source product",
                 }
             )
@@ -356,12 +386,22 @@ def store_rejected_candidates(
                 update product_matches
                 set zendrop_match_score = ?,
                     visual_status = 'vision_rejected',
+                    vision_confidence = ?,
+                    vision_reason = ?,
+                    vision_verdict_json = ?,
                     total_cost_usd = ?,
                     status = 'rejected',
                     updated_at = current_timestamp
                 where id = ?
                 """,
-                (candidate["score"], total_cost, existing_match[0]),
+                (
+                    candidate["score"],
+                    candidate.get("vision_confidence"),
+                    candidate.get("vision_reason"),
+                    json.dumps(candidate.get("vision_verdict") or {}, ensure_ascii=False),
+                    total_cost,
+                    existing_match[0],
+                ),
             )
         else:
             database.execute(
@@ -371,16 +411,22 @@ def store_rejected_candidates(
                     zendrop_product_id,
                     zendrop_match_score,
                     visual_status,
+                    vision_confidence,
+                    vision_reason,
+                    vision_verdict_json,
                     total_cost_usd,
                     status,
                     updated_at
                 )
-                values (?, ?, ?, 'vision_rejected', ?, 'rejected', current_timestamp)
+                values (?, ?, ?, 'vision_rejected', ?, ?, ?, ?, 'rejected', current_timestamp)
                 """,
                 (
                     competitor_product_id,
                     candidate["product_id"],
                     candidate["score"],
+                    candidate.get("vision_confidence"),
+                    candidate.get("vision_reason"),
+                    json.dumps(candidate.get("vision_verdict") or {}, ensure_ascii=False),
                     total_cost,
                 ),
             )
@@ -413,7 +459,8 @@ def verify_visual_match(
                         "You are a strict ecommerce product visual matcher. Return JSON only. "
                         "The second image must be a real product photo. Reject size charts, measurement tables, "
                         "text-heavy guide images, packaging-only images, or images where the wearable product is not visible. "
-                        "Only pass when the images look at least 80% like the same sellable product. "
+                        "Pass when the images look at least 75% like the same sellable product. "
+                        "Use confidence 0.60-0.74 for close candidates that need human review. "
                         "Reject different color families, different silhouettes or cuts, different shoe construction, "
                         "different heel/sole style, different sleeve/strap style, different pattern, and different overall design."
                     ),
@@ -441,21 +488,31 @@ def verify_visual_match(
         if response.status_code >= 400:
             return {"same_product": False, "confidence": 0.0, "source": "openai_vision", "reason": response.text[:300]}
         payload = parse_openai_json(response.json())
-        same_product = is_strict_visual_match(payload)
-        return {**payload, "same_product": same_product, "source": "openai_vision"}
+        return {**payload, "same_product": bool(payload.get("same_product")), "source": "openai_vision"}
     except Exception as error:
         return {"same_product": False, "confidence": 0.0, "source": "openai_vision", "reason": str(error)[:300]}
 
 
-def is_strict_visual_match(payload: dict[str, Any]) -> bool:
-    if not bool(payload.get("same_product")):
-        return False
+def classify_visual_verdict(payload: dict[str, Any]) -> str | None:
+    if payload.get("source") != "openai_vision":
+        return "text_only" if bool(payload.get("same_product")) else None
     if payload.get("zendrop_image_is_product_photo") is False:
-        return False
-    if float(payload.get("confidence") or 0) < VISION_PASS_CONFIDENCE:
-        return False
+        return None
+    confidence = verdict_confidence(payload)
     strict_keys = ("category_match", "silhouette_match", "color_match")
-    return all(payload.get(key) is not False for key in strict_keys)
+    strict_match = all(payload.get(key) is not False for key in strict_keys)
+    if bool(payload.get("same_product")) and confidence >= VISION_PASS_CONFIDENCE:
+        return "vision_pass" if strict_match else "vision_review"
+    if confidence >= VISION_REVIEW_CONFIDENCE:
+        return "vision_review"
+    return None
+
+
+def verdict_confidence(payload: dict[str, Any]) -> float:
+    try:
+        return float(payload.get("confidence") or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def score_zendrop_candidate(competitor_text: str, zendrop_name: str) -> float:
@@ -596,6 +653,8 @@ def list_approval_cards(database: sqlite3.Connection, storage_dir: Path, limit: 
             pm.status,
             pm.visual_status,
             pm.zendrop_match_score,
+            pm.vision_confidence,
+            pm.vision_reason,
             pm.total_cost_usd,
             pm.manual_supplier_url,
             cp.id,
@@ -624,22 +683,24 @@ def list_approval_cards(database: sqlite3.Connection, storage_dir: Path, limit: 
             "status": row[1],
             "visual_status": row[2],
             "zendrop_match_score": row[3],
-            "manual_supplier_url": row[5],
+            "vision_confidence": row[4],
+            "vision_reason": row[5],
+            "manual_supplier_url": row[7],
             "competitor": {
-                "id": row[6],
-                "title": row[7],
-                "price": row[8],
-                "image_url": media_url_for_path(row[9], storage_dir),
+                "id": row[8],
+                "title": row[9],
+                "price": row[10],
+                "image_url": media_url_for_path(row[11], storage_dir),
             },
             "zendrop": {
-                "product_id": row[10],
-                "name": row[11],
-                "image_url": row[12],
-                "price_usd": row[13],
-                "shipping_country_code": row[14],
-                "shipping_price_usd": row[15],
-                "shipping_estimated_delivery": row[16],
-                "total_cost_usd": row[4],
+                "product_id": row[12],
+                "name": row[13],
+                "image_url": row[14],
+                "price_usd": row[15],
+                "shipping_country_code": row[16],
+                "shipping_price_usd": row[17],
+                "shipping_estimated_delivery": row[18],
+                "total_cost_usd": row[6],
             },
         }
         for row in rows

@@ -192,7 +192,7 @@ def test_build_approval_matches_does_not_create_card_when_vision_rejects(tmp_pat
         cards = list_approval_cards(database=database, storage_dir=tmp_path / "storage")
         rejected_row = database.execute(
             """
-            select zendrop_product_id, status, visual_status
+            select zendrop_product_id, status, visual_status, vision_confidence, vision_reason
             from product_matches
             where competitor_product_id = 1
             """
@@ -200,7 +200,84 @@ def test_build_approval_matches_does_not_create_card_when_vision_rejects(tmp_pat
 
     assert result == {"matches_created": 0}
     assert cards == []
-    assert rejected_row == (3130392, "rejected", "vision_rejected")
+    assert rejected_row == (3130392, "rejected", "vision_rejected", 0.41, "Needs manual review")
+
+
+def test_build_approval_matches_creates_manual_review_card_for_fallback_vision_score(tmp_path, monkeypatch):
+    database_url = f"sqlite:///{tmp_path / 'pipeline.db'}"
+    image_path = tmp_path / "storage" / "competitor_images" / "dress.jpg"
+    image_path.parent.mkdir(parents=True)
+    image_path.write_bytes(b"image")
+
+    def fake_visual_match(**kwargs):
+        return {
+            "same_product": True,
+            "confidence": 0.64,
+            "source": "openai_vision",
+            "zendrop_image_is_product_photo": True,
+            "category_match": True,
+            "silhouette_match": False,
+            "color_match": False,
+            "reason": "Close enough for manual approval",
+        }
+
+    monkeypatch.setattr(approval_matching, "verify_visual_match", fake_visual_match)
+
+    with open_database(database_url) as database:
+        database.execute(
+            """
+            insert into competitor_products (
+                store_url, handle, title, price, image_path, tags_json, status, raw_json
+            )
+            values (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "https://example.com",
+                "halter-maxi-dress",
+                "Halter Neck Mesh Maxi Dress",
+                79.0,
+                str(image_path),
+                "[]",
+                "ready_for_zendrop",
+                "{}",
+            ),
+        )
+        database.execute(
+            """
+            insert into zendrop_products (
+                product_id, name, price_usd, image_url, raw_json, shipping_country_code, shipping_price_usd
+            )
+            values (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                3130392,
+                "Halter Neck Mesh Maxi Dress",
+                6.06,
+                "https://file.zendrop.com/product.webp",
+                json.dumps({"images": [{"url": "https://file.zendrop.com/product.webp"}]}),
+                "ca",
+                6.29,
+            ),
+        )
+        database.commit()
+
+        result = build_approval_matches(database=database, min_score=50)
+        cards = list_approval_cards(database=database, storage_dir=tmp_path / "storage")
+        match_row = database.execute(
+            """
+            select status, visual_status, vision_confidence, vision_reason, vision_verdict_json
+            from product_matches
+            where competitor_product_id = 1
+            """
+        ).fetchone()
+
+    assert result == {"matches_created": 1}
+    assert cards[0]["status"] == "approval_pending"
+    assert cards[0]["visual_status"] == "vision_review"
+    assert cards[0]["vision_confidence"] == 0.64
+    assert cards[0]["vision_reason"] == "Close enough for manual approval"
+    assert match_row[0:4] == ("approval_pending", "vision_review", 0.64, "Close enough for manual approval")
+    assert json.loads(match_row[4])["confidence"] == 0.64
 
 
 def test_build_approval_matches_retries_next_candidate_after_rejected_zendrop_item(tmp_path, monkeypatch):

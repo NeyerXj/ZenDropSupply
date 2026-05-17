@@ -122,3 +122,82 @@ async def test_competitor_pipeline_limit_counts_ready_products_after_filters(tmp
         ("mens-jacket", "skipped_male"),
         ("floral-maxi-dress", "ready_for_zendrop"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_competitor_pipeline_continues_pages_until_ready_target_is_reached(tmp_path):
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/collections/all" and request.url.params.get("page") == "1":
+            return httpx.Response(200, text='<a href="/products/mens-jacket">Mens Jacket</a>')
+        if request.url.path == "/collections/all" and request.url.params.get("page") == "2":
+            return httpx.Response(
+                200,
+                text=(
+                    '<a href="/products/floral-maxi-dress">Dress</a>'
+                    '<a href="/products/second-dress">Second Dress</a>'
+                ),
+            )
+        if request.url.path == "/products/mens-jacket.json":
+            return httpx.Response(
+                200,
+                json={
+                    "product": {
+                        "id": 11,
+                        "handle": "mens-jacket",
+                        "title": "Mens Jacket",
+                        "product_type": "Jackets",
+                        "tags": ["Men"],
+                        "image": None,
+                        "variants": [{"price": "49.99"}],
+                    }
+                },
+            )
+        if request.url.path == "/products/floral-maxi-dress.json":
+            return httpx.Response(
+                200,
+                json={
+                    "product": {
+                        "id": 12,
+                        "handle": "floral-maxi-dress",
+                        "title": "Floral Maxi Dress",
+                        "product_type": "Dresses",
+                        "tags": ["Women", "Summer"],
+                        "image": None,
+                        "variants": [{"price": "59.99"}],
+                    }
+                },
+            )
+        if request.url.path == "/products/second-dress.json":
+            return httpx.Response(
+                200,
+                json={
+                    "product": {
+                        "id": 13,
+                        "handle": "second-dress",
+                        "title": "Second Summer Dress",
+                        "product_type": "Dresses",
+                        "tags": ["Women", "Summer"],
+                        "image": None,
+                        "variants": [{"price": "64.99"}],
+                    }
+                },
+            )
+        raise AssertionError(f"Unexpected URL: {request.url}")
+
+    settings = Settings(database_url=f"sqlite:///{tmp_path / 'pipeline.db'}")
+
+    async with open_database(settings.database_url) as database:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+            client = CompetitorShopifyClient(http_client=http_client)
+            pipeline = CompetitorPipeline(
+                database=database,
+                client=client,
+                image_storage_dir=tmp_path / "competitor_images",
+            )
+            await pipeline.scrape_store("https://example.com", pages=1, limit=2)
+
+        ready_count = database.execute(
+            "select count(*) from competitor_products where status = 'ready_for_zendrop'"
+        ).fetchone()[0]
+
+    assert ready_count == 2

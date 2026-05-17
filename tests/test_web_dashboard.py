@@ -74,6 +74,8 @@ def test_dashboard_summary_counts_pipeline_records(tmp_path):
     assert response.json() == {
         "preview_cards_total": 1,
         "vision_rejected_total": 0,
+        "vision_review_total": 0,
+        "vision_pass_total": 0,
         "match_jobs_done_total": 0,
         "match_jobs_active_total": 0,
         "competitor_total": 2,

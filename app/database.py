@@ -49,6 +49,9 @@ create table if not exists product_matches (
     zendrop_product_id integer not null,
     zendrop_match_score real not null,
     visual_status text not null default 'pending',
+    vision_confidence real,
+    vision_reason text,
+    vision_verdict_json text not null default '{}',
     status text not null default 'approval_pending',
     manual_supplier_url text,
     total_cost_usd real,
@@ -229,6 +232,9 @@ create table if not exists product_matches (
     zendrop_product_id bigint not null references zendrop_products(product_id),
     zendrop_match_score double precision not null,
     visual_status text not null default 'pending',
+    vision_confidence double precision,
+    vision_reason text,
+    vision_verdict_json text not null default '{}',
     status text not null default 'approval_pending',
     manual_supplier_url text,
     total_cost_usd double precision,
@@ -370,6 +376,44 @@ def postgres_sql_from_sqlite_placeholders(sql: str) -> str:
     return sql.replace("?", "%s")
 
 
+def ensure_schema_migrations(connection: sqlite3.Connection | "PostgresConnection", database_url: str) -> None:
+    if is_postgres_url(database_url):
+        existing_columns = {
+            row[0]
+            for row in connection.execute(
+                """
+                select column_name
+                from information_schema.columns
+                where table_name = 'product_matches'
+                """
+            ).fetchall()
+        }
+        column_definitions = {
+            "vision_confidence": "double precision",
+            "vision_reason": "text",
+            "vision_verdict_json": "text not null default '{}'",
+        }
+        for column_name, column_definition in column_definitions.items():
+            if column_name not in existing_columns:
+                connection.execute(f"alter table product_matches add column {column_name} {column_definition}")
+        connection.commit()
+        return
+
+    existing_columns = {
+        row[1]
+        for row in connection.execute("pragma table_info(product_matches)").fetchall()
+    }
+    column_definitions = {
+        "vision_confidence": "real",
+        "vision_reason": "text",
+        "vision_verdict_json": "text not null default '{}'",
+    }
+    for column_name, column_definition in column_definitions.items():
+        if column_name not in existing_columns:
+            connection.execute(f"alter table product_matches add column {column_name} {column_definition}")
+    connection.commit()
+
+
 def sqlite_path_from_url(database_url: str) -> Path:
     if database_url == "sqlite:///:memory:":
         return Path(":memory:")
@@ -417,7 +461,9 @@ class DatabaseContext:
                 with connection.cursor() as cursor:
                     cursor.execute(POSTGRES_SCHEMA)
                 connection.commit()
-            return PostgresConnection(connection)
+            postgres_connection = PostgresConnection(connection)
+            ensure_schema_migrations(postgres_connection, self.database_url)
+            return postgres_connection
 
         database_path = sqlite_path_from_url(self.database_url)
         if str(database_path) != ":memory:":
@@ -426,6 +472,7 @@ class DatabaseContext:
         connection.execute("pragma journal_mode=wal")
         connection.executescript(SCHEMA)
         connection.commit()
+        ensure_schema_migrations(connection, self.database_url)
         return connection
 
 

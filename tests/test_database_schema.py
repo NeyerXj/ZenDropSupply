@@ -29,6 +29,18 @@ def test_pipeline_state_tables_are_created_for_sqlite(tmp_path):
         "shopify_draft_products",
     }.issubset(table_names)
 
+    with open_database(database_url) as database:
+        match_columns = {
+            row[1]
+            for row in database.execute("pragma table_info(product_matches)").fetchall()
+        }
+
+    assert {
+        "vision_confidence",
+        "vision_reason",
+        "vision_verdict_json",
+    }.issubset(match_columns)
+
 
 def test_postgres_url_detection_supports_vps_database_url():
     assert is_postgres_url("postgresql://ttd:secret@postgres:5432/ttd_pipeline")
