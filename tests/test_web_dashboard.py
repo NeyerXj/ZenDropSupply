@@ -272,9 +272,16 @@ def test_dashboard_builds_and_lists_approval_cards(tmp_path):
     list_response = client.get("/api/approval-cards")
 
     assert build_response.status_code == 200
-    assert build_response.json() == {"count": 1, "matches_created": 1}
+    assert build_response.json() == {"count": 1, "jobs_queued": 1}
     assert list_response.status_code == 200
-    assert list_response.json()["cards"][0]["zendrop"]["total_cost_usd"] == 22.5
+    assert list_response.json()["cards"] == []
+    with open_database(settings.database_url) as database:
+        queued_jobs = database.execute(
+            "select stage, status, payload_json from pipeline_jobs where stage = 'approval_match_product'"
+        ).fetchall()
+    assert len(queued_jobs) == 1
+    assert queued_jobs[0][1] == "queued"
+    assert "competitor_product_id" in queued_jobs[0][2]
 
 
 def test_dashboard_approves_card_and_queues_openai_content(tmp_path):
@@ -388,13 +395,16 @@ def test_dashboard_rejects_card_and_cancels_pending_approval_work(tmp_path):
     assert response.status_code == 200
     assert response.json()["status"] == "rejected"
     assert response.json()["canceled_jobs"] == 2
+    assert response.json()["retry_job_queued"] is True
     with open_database(settings.database_url) as database:
         match_status = database.execute("select status from product_matches where id = ?", (product_match_id,)).fetchone()[0]
         canceled_jobs = database.execute("select count(*) from pipeline_jobs where status = 'canceled'").fetchone()[0]
         content_rows = database.execute("select count(*) from generated_contents").fetchone()[0]
+        retry_jobs = database.execute("select count(*) from pipeline_jobs where stage = 'approval_match_product'").fetchone()[0]
     assert match_status == "rejected"
     assert canceled_jobs == 2
     assert content_rows == 0
+    assert retry_jobs == 1
 
 
 def test_zendrop_run_requires_api_token(tmp_path):

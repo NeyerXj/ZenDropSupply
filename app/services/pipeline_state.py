@@ -9,6 +9,7 @@ ACTIVE_PIPELINE_STAGES = (
     "competitor_scrape",
     "zendrop_search",
     "approval_matching",
+    "approval_match_product",
     "openai_content",
     "gemini_images",
     "final_model_images",
@@ -178,28 +179,31 @@ def get_pipeline_activity(database: sqlite3.Connection, limit: int = 20) -> dict
 
 
 def claim_next_pipeline_job(database: sqlite3.Connection) -> dict | None:
-    row = database.execute(
-        """
-        select id
-        from pipeline_jobs
-        where status = 'queued'
-        order by priority asc, id asc
-        limit 1
-        """
-    ).fetchone()
-    if row is None:
-        return None
-    job_id = row[0]
-    database.execute(
-        """
-        update pipeline_jobs
-        set status = 'running', locked_at = current_timestamp, updated_at = current_timestamp
-        where id = ?
-        """,
-        (job_id,),
-    )
-    database.commit()
-    return get_pipeline_job(database, job_id)
+    for _attempt in range(5):
+        row = database.execute(
+            """
+            select id
+            from pipeline_jobs
+            where status = 'queued'
+            order by priority asc, id asc
+            limit 1
+            """
+        ).fetchone()
+        if row is None:
+            return None
+        job_id = row[0]
+        cursor = database.execute(
+            """
+            update pipeline_jobs
+            set status = 'running', locked_at = current_timestamp, updated_at = current_timestamp
+            where id = ? and status = 'queued'
+            """,
+            (job_id,),
+        )
+        database.commit()
+        if cursor.rowcount:
+            return get_pipeline_job(database, job_id)
+    return None
 
 
 def complete_pipeline_job(database: sqlite3.Connection, job_id: int, result: dict[str, Any]) -> dict:

@@ -16,7 +16,7 @@ from app.config import Settings, load_settings
 from app.database import open_database
 from app.providers.competitor_shopify import CompetitorShopifyClient
 from app.providers.zendrop import ZendropMcpClient
-from app.services.approval_matching import build_approval_matches, list_approval_cards
+from app.services.approval_matching import list_approval_cards, queue_approval_match_jobs
 from app.services.competitor_pipeline import CompetitorPipeline
 from app.services.dashboard import (
     PRODUCT_STATUSES,
@@ -492,7 +492,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             """
             select pm.id, pm.competitor_product_id, pm.status, pj.run_id
             from product_matches pm
-            left join pipeline_jobs pj on pj.stage = 'approval_matching' and pj.status = 'done'
+            left join pipeline_jobs pj on pj.stage in ('approval_matching', 'approval_match_product') and pj.status = 'done'
             where pm.id = ?
             order by pj.updated_at desc
             limit 1
@@ -503,6 +503,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Approval card not found")
         content_job_queued = False
         canceled_jobs = 0
+        retry_job_queued = False
         database.execute(
             """
             update product_matches
@@ -527,18 +528,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 product_match_id=product_match_id,
                 competitor_product_id=row[1],
             )
-            build_approval_matches(
+            enqueue_pipeline_job(
                 database=database,
-                openai_settings=app_settings.openai,
-                storage_dir=app_settings.storage_dir,
-                competitor_product_ids=[row[1]],
+                run_id=row[3],
+                stage="approval_match_product",
+                payload={"competitor_product_id": row[1]},
+                priority=130,
             )
+            retry_job_queued = True
         database.commit()
         return {
             "id": product_match_id,
             "status": request.status,
             "content_job_queued": content_job_queued,
             "canceled_jobs": canceled_jobs,
+            "retry_job_queued": retry_job_queued,
         }
 
     @web_app.get("/api/filter-config")
@@ -573,6 +577,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 stage="zendrop_search",
                 payload={
                     "keyword": product["title"],
+                    "competitor_product_id": product_id,
                     "limit": 5,
                     "country_code": app_settings.zendrop.default_country_code,
                 },
@@ -616,12 +621,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @web_app.post("/api/run/approval-matching")
     def run_approval_matching(_: None = Depends(require_admin), database=Depends(get_database)) -> dict:
-        result = build_approval_matches(
-            database=database,
-            openai_settings=app_settings.openai,
-            storage_dir=app_settings.storage_dir,
-        )
-        return {"count": result["matches_created"], **result}
+        result = queue_approval_match_jobs(database=database)
+        return {"count": result["jobs_queued"], **result}
 
     return web_app
 

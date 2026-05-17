@@ -13,7 +13,7 @@ from app.providers.competitor_shopify import CompetitorShopifyClient
 from app.providers.gemini_images import GeminiImageClient
 from app.providers.openai_content import OpenAIContentClient
 from app.providers.zendrop import ZendropMcpClient
-from app.services.approval_matching import build_approval_matches
+from app.services.approval_matching import build_approval_matches, queue_approval_match_jobs
 from app.services.competitor_pipeline import CompetitorPipeline
 from app.services.filtering import get_active_filter_config
 from app.services.final_catalog import FinalCatalogService
@@ -58,6 +58,8 @@ class PipelineWorker:
             return await self.run_zendrop_search(job, payload)
         if stage == "approval_matching":
             return await self.run_approval_matching(job, payload)
+        if stage == "approval_match_product":
+            return await self.run_approval_match_product(job, payload)
         if stage == "openai_content":
             return await self.run_openai_content(job, payload)
         if stage == "gemini_images":
@@ -99,6 +101,7 @@ class PipelineWorker:
                         stage="zendrop_search",
                         payload={
                             "keyword": zendrop_search_text(title),
+                            "competitor_product_id": product_id,
                             "source_title": title,
                             "limit": 5,
                             "country_code": self.settings.zendrop.default_country_code,
@@ -117,21 +120,31 @@ class PipelineWorker:
                     limit=int(payload.get("limit") or 5),
                     country_code=payload.get("country_code") or self.settings.zendrop.default_country_code,
                 )
-                enqueue_pipeline_job(
-                    database=database,
-                    run_id=job["run_id"],
-                    stage="approval_matching",
-                    payload={},
-                    priority=130,
-                )
+                competitor_product_id = payload.get("competitor_product_id")
+                if competitor_product_id:
+                    enqueue_pipeline_job(
+                        database=database,
+                        run_id=job["run_id"],
+                        stage="approval_match_product",
+                        payload={"competitor_product_id": int(competitor_product_id)},
+                        priority=130,
+                    )
+                else:
+                    queue_approval_match_jobs(database=database, run_id=job["run_id"])
         return {"products_saved": len(products), "keyword": payload["keyword"]}
 
     async def run_approval_matching(self, job: dict, payload: dict[str, Any]) -> dict[str, Any]:
+        with open_database(self.settings.database_url) as database:
+            result = queue_approval_match_jobs(database=database, run_id=job["run_id"])
+        return result
+
+    async def run_approval_match_product(self, job: dict, payload: dict[str, Any]) -> dict[str, Any]:
         with open_database(self.settings.database_url) as database:
             result = build_approval_matches(
                 database=database,
                 openai_settings=self.settings.openai,
                 storage_dir=self.settings.storage_dir,
+                competitor_product_ids=[int(payload["competitor_product_id"])],
             )
         return result
 

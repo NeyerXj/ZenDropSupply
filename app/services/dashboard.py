@@ -31,7 +31,9 @@ def get_summary(database: sqlite3.Connection) -> dict:
         ).fetchall()
     }
     zendrop_total = database.execute("select count(*) from zendrop_products").fetchone()[0]
-    preview_cards_total = database.execute("select count(*) from product_matches").fetchone()[0]
+    preview_cards_total = database.execute(
+        "select count(*) from product_matches where status in ('approval_pending', 'approved')"
+    ).fetchone()[0]
     manual_approved_total = database.execute("select count(*) from product_matches where status = 'approved'").fetchone()[0]
     final_images_total = database.execute(
         "select count(*) from final_image_sets where status = 'ready' and generated_count >= 5"

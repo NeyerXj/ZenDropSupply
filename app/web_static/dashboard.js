@@ -328,6 +328,7 @@ function stageLabel(stage) {
     competitor_scrape: "Competitor scraping",
     zendrop_search: "Zendrop search",
     approval_matching: "Match preview",
+    approval_match_product: "Match preview",
     openai_content: "Product enhancer",
     final_model_images: "Image enhancer",
     shopify_draft_upload: "Shopify draft upload",
@@ -453,7 +454,7 @@ async function runNextAction() {
       await startSourcing(document.getElementById("sourceSetupForm"));
     } else if (button.dataset.action === "preview") {
       const result = await fetchJson("/api/run/approval-matching", { method: "POST" });
-      showToast(`Match preview built. ${result.count} cards.`);
+      showToast(`Match preview jobs queued: ${result.count}.`);
     } else if (button.dataset.action === "images") {
       const result = await fetchJson("/api/run/final-images", {
         method: "POST",
@@ -492,7 +493,8 @@ async function updateApprovalStatus(productMatchId, status) {
     if (status === "approved") {
       showToast(result.content_job_queued ? "Approved. Product enhancer queued." : "Approved. Product enhancer already exists.");
     } else {
-      showToast(result.canceled_jobs ? `Card marked as ${status}. ${result.canceled_jobs} jobs canceled.` : `Card marked as ${status}.`);
+      const retryText = result.retry_job_queued ? " New match search queued." : "";
+      showToast(result.canceled_jobs ? `Card marked as ${status}. ${result.canceled_jobs} jobs canceled.${retryText}` : `Card marked as ${status}.${retryText}`);
     }
     await loadState();
   } catch (error) {

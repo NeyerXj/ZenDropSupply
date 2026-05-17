@@ -13,6 +13,7 @@ from rapidfuzz import fuzz
 
 from app.config import OpenAISettings
 from app.services.dashboard import media_url_for_path
+from app.services.pipeline_state import enqueue_pipeline_job
 from app.services.search_terms import zendrop_search_text
 
 
@@ -74,7 +75,7 @@ def build_approval_matches(
 ) -> dict[str, int]:
     zendrop_rows = database.execute(
         """
-        select product_id, name, price_usd, shipping_price_usd, image_url
+        select product_id, name, price_usd, shipping_price_usd, image_url, raw_json
         from zendrop_products
         order by updated_at desc, product_id desc
         """
@@ -89,6 +90,51 @@ def build_approval_matches(
     )
     database.commit()
     return {"matches_created": matches_created}
+
+
+def queue_approval_match_jobs(database: sqlite3.Connection, run_id: int | None = None) -> dict[str, int]:
+    active_product_ids = set()
+    active_rows = database.execute(
+        """
+        select payload_json
+        from pipeline_jobs
+        where stage = 'approval_match_product' and status in ('queued', 'running')
+        """
+    ).fetchall()
+    for active_row in active_rows:
+        try:
+            payload = json.loads(active_row[0])
+            if payload.get("competitor_product_id") is not None:
+                active_product_ids.add(int(payload["competitor_product_id"]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+    rows = database.execute(
+        """
+        select cp.id
+        from competitor_products cp
+        where cp.status in ('ready_for_zendrop', 'zendrop_matched')
+          and not exists (
+            select 1 from product_matches pm
+            where pm.competitor_product_id = cp.id
+              and pm.status in ('approval_pending', 'approved', 'skipped')
+          )
+        order by cp.updated_at desc, cp.id desc
+        """,
+    ).fetchall()
+    queued = 0
+    for row in rows:
+        product_id = int(row[0])
+        if product_id in active_product_ids:
+            continue
+        enqueue_pipeline_job(
+            database=database,
+            run_id=run_id,
+            stage="approval_match_product",
+            payload={"competitor_product_id": product_id},
+            priority=130,
+        )
+        queued += 1
+    return {"jobs_queued": queued}
 
 
 def build_zendrop_only_matches(
@@ -149,8 +195,16 @@ def build_zendrop_only_matches(
         )
         if candidate is None:
             continue
-        zendrop_product_id, _name, score, price_usd, shipping_price_usd, _image_url, visual_status = candidate
+        zendrop_product_id, _name, score, price_usd, shipping_price_usd, selected_image_url, visual_status = candidate
         total_cost = (price_usd or 0) + (shipping_price_usd or 0)
+        database.execute(
+            """
+            update zendrop_products
+            set image_url = ?, updated_at = current_timestamp
+            where product_id = ?
+            """,
+            (selected_image_url, zendrop_product_id),
+        )
         database.execute(
             """
             insert into product_matches (
@@ -174,7 +228,7 @@ def find_best_zendrop_match(search_text: str, zendrop_rows: list[tuple], min_sco
     candidates = find_top_zendrop_matches(search_text, zendrop_rows, min_score, excluded_product_ids=set(), limit=1)
     if not candidates:
         return None
-    product_id, _name, score, price_usd, shipping_price_usd, _image_url = candidates[0]
+    product_id, _name, score, price_usd, shipping_price_usd, _image_url, _raw_json = candidates[0]
     return product_id, score, price_usd, shipping_price_usd
 
 
@@ -189,12 +243,13 @@ def find_top_zendrop_matches(
     best_score = 0.0
     required_score = max(min_score, category_min_score(product_category(search_text)))
     candidates = []
-    for product_id, name, price_usd, shipping_price_usd, image_url in zendrop_rows:
+    for row in zendrop_rows:
+        product_id, name, price_usd, shipping_price_usd, image_url, raw_json = normalize_zendrop_row(row)
         if int(product_id) in excluded_product_ids:
             continue
         score = score_zendrop_candidate(search_text, name)
         if score >= required_score:
-            candidates.append((product_id, name, score, price_usd, shipping_price_usd, image_url))
+            candidates.append((product_id, name, score, price_usd, shipping_price_usd, image_url, raw_json))
             if score > best_score:
                 best_score = score
                 best_candidate = candidates[-1]
@@ -209,18 +264,19 @@ def choose_vision_verified_candidate(
     openai_settings: OpenAISettings | None,
     storage_dir: Path | None,
 ) -> tuple | None:
-    for product_id, name, score, price_usd, shipping_price_usd, image_url in candidates:
-        verdict = verify_visual_match(
-            competitor_title=competitor_title,
-            competitor_image_path=competitor_image_path,
-            zendrop_title=str(product_id),
-            zendrop_name=name,
-            zendrop_image_url=image_url,
-            openai_settings=openai_settings,
-        )
-        if verdict["same_product"]:
-            visual_status = "vision_pass" if verdict["source"] == "openai_vision" else "text_only"
-            return product_id, name, score, price_usd, shipping_price_usd, image_url, visual_status
+    for product_id, name, score, price_usd, shipping_price_usd, image_url, raw_json in candidates:
+        for candidate_image_url in zendrop_product_image_urls(image_url=image_url, raw_json=raw_json):
+            verdict = verify_visual_match(
+                competitor_title=competitor_title,
+                competitor_image_path=competitor_image_path,
+                zendrop_title=str(product_id),
+                zendrop_name=name,
+                zendrop_image_url=candidate_image_url,
+                openai_settings=openai_settings,
+            )
+            if verdict["same_product"]:
+                visual_status = "vision_pass" if verdict["source"] == "openai_vision" else "text_only"
+                return product_id, name, score, price_usd, shipping_price_usd, candidate_image_url, visual_status
     return None
 
 
@@ -248,8 +304,10 @@ def verify_visual_match(
                 json={
                     "model": openai_settings.model,
                     "instructions": (
-                        "You are a strict ecommerce product visual matcher. "
-                        "Return JSON only. Reject if product type, silhouette, color family, pattern, closure, heel/sole style, "
+                        "You are a strict ecommerce product visual matcher. Return JSON only. "
+                        "The second image must be a real product photo. Reject size charts, measurement tables, "
+                        "text-heavy guide images, packaging-only images, or images where the wearable product is not visible. "
+                        "Reject if product type, silhouette, color family, pattern, closure, heel/sole style, "
                         "sleeve/strap style, or overall design do not match."
                     ),
                     "input": [
@@ -260,6 +318,7 @@ def verify_visual_match(
                                     "type": "input_text",
                                     "text": (
                                         "Return JSON with keys same_product boolean, confidence number 0-1, "
+                                        "zendrop_image_is_product_photo boolean, "
                                         "category_match, silhouette_match, color_match, pattern_match, closure_match booleans, "
                                         f"reason string. Competitor title: {competitor_title}. Zendrop title: {zendrop_name or zendrop_title}."
                                     ),
@@ -275,7 +334,11 @@ def verify_visual_match(
         if response.status_code >= 400:
             return {"same_product": False, "confidence": 0.0, "source": "openai_vision", "reason": response.text[:300]}
         payload = parse_openai_json(response.json())
-        same_product = bool(payload.get("same_product")) and float(payload.get("confidence") or 0) >= 0.72
+        same_product = (
+            bool(payload.get("same_product"))
+            and payload.get("zendrop_image_is_product_photo") is not False
+            and float(payload.get("confidence") or 0) >= 0.72
+        )
         return {**payload, "same_product": same_product, "source": "openai_vision"}
     except Exception as error:
         return {"same_product": False, "confidence": 0.0, "source": "openai_vision", "reason": str(error)[:300]}
@@ -300,6 +363,34 @@ def score_zendrop_candidate(competitor_text: str, zendrop_name: str) -> float:
         missing_ratio = 1 - (len(overlap) / max(len(competitor_attributes), 1))
         score -= min(24, missing_ratio * 18)
     return max(0.0, score)
+
+
+def normalize_zendrop_row(row: tuple) -> tuple:
+    if len(row) == 5:
+        product_id, name, price_usd, shipping_price_usd, image_url = row
+        return product_id, name, price_usd, shipping_price_usd, image_url, "{}"
+    return row
+
+
+def zendrop_product_image_urls(image_url: str | None, raw_json: str | None) -> list[str]:
+    urls: list[str] = []
+    if image_url:
+        urls.append(image_url)
+    try:
+        raw = json.loads(raw_json or "{}")
+    except json.JSONDecodeError:
+        raw = {}
+    for image in raw.get("images") or []:
+        url = image.get("url") if isinstance(image, dict) else None
+        if url:
+            urls.append(url)
+    clean_urls: list[str] = []
+    seen: set[str] = set()
+    for url in urls:
+        if url not in seen:
+            clean_urls.append(url)
+            seen.add(url)
+    return clean_urls
 
 
 def product_category(text: str) -> str | None:
@@ -407,6 +498,7 @@ def list_approval_cards(database: sqlite3.Connection, storage_dir: Path, limit: 
         from product_matches pm
         join competitor_products cp on cp.id = pm.competitor_product_id
         join zendrop_products zp on zp.product_id = pm.zendrop_product_id
+        where pm.status in ('approval_pending', 'approved')
         order by pm.updated_at desc, pm.id desc
         limit ?
         """,
