@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from io import BytesIO
 import json
 import mimetypes
 import sqlite3
@@ -9,6 +10,7 @@ import re
 from typing import Any
 
 import httpx
+from PIL import Image, UnidentifiedImageError
 from rapidfuzz import fuzz
 
 from app.config import OpenAISettings
@@ -106,6 +108,8 @@ VISION_CANDIDATE_LIMIT = 12
 VISION_PASS_CONFIDENCE = 0.75
 VISION_REVIEW_CONFIDENCE = 0.60
 VISION_NEAR_REVIEW_CONFIDENCE = 0.60
+VISION_SOFT_REVIEW_CONFIDENCE = 0.55
+IMAGE_PREFLIGHT_CACHE: dict[str, str | None] = {}
 
 
 def build_approval_matches(
@@ -418,7 +422,22 @@ def choose_vision_verified_candidate(
             )
             continue
         product_rejected = False
+        last_rejection: dict[str, Any] | None = None
         for candidate_image_url in zendrop_product_image_urls(image_url=image_url, raw_json=raw_json):
+            preflight_reject_reason = zendrop_image_preflight_reject_reason(candidate_image_url)
+            if preflight_reject_reason:
+                last_rejection = {
+                    "product_id": product_id,
+                    "score": score,
+                    "price_usd": price_usd,
+                    "shipping_price_usd": shipping_price_usd,
+                    "image_url": candidate_image_url,
+                    "vision_confidence": 0.0,
+                    "vision_reason": preflight_reject_reason,
+                    "vision_verdict": {"source": "image_preflight", "reason": preflight_reject_reason},
+                    "reason": preflight_reject_reason,
+                }
+                continue
             verdict = verify_visual_match(
                 competitor_title=competitor_title,
                 competitor_image_path=competitor_image_path,
@@ -442,20 +461,21 @@ def choose_vision_verified_candidate(
                     verdict,
                 ), rejected_candidates
             product_rejected = True
-        if product_rejected:
-            rejected_candidates.append(
-                {
-                    "product_id": product_id,
-                    "score": score,
-                    "price_usd": price_usd,
-                    "shipping_price_usd": shipping_price_usd,
-                    "image_url": image_url,
-                    "vision_confidence": verdict_confidence(verdict),
-                    "vision_reason": verdict.get("reason"),
-                    "vision_verdict": verdict,
-                    "reason": "AI Vision rejected this Zendrop candidate for the current source product",
-                }
-            )
+            last_rejection = {
+                "product_id": product_id,
+                "score": score,
+                "price_usd": price_usd,
+                "shipping_price_usd": shipping_price_usd,
+                "image_url": image_url,
+                "vision_confidence": verdict_confidence(verdict),
+                "vision_reason": verdict.get("reason"),
+                "vision_verdict": verdict,
+                "reason": "AI Vision rejected this Zendrop candidate for the current source product",
+            }
+        if product_rejected and last_rejection:
+            rejected_candidates.append(last_rejection)
+        elif last_rejection:
+            rejected_candidates.append(last_rejection)
     return None, rejected_candidates
 
 
@@ -469,6 +489,56 @@ def candidate_quality_gate(candidate: tuple) -> str | None:
     if not image_urls:
         return "Rejected before approval: missing Zendrop product image"
     return None
+
+
+def zendrop_image_preflight_reject_reason(image_url: str | None) -> str | None:
+    if not image_url:
+        return "Rejected before AI Vision: missing Zendrop product image"
+    cached_reason = IMAGE_PREFLIGHT_CACHE.get(image_url)
+    if image_url in IMAGE_PREFLIGHT_CACHE:
+        return cached_reason
+    normalized_url = image_url.lower()
+    if any(marker in normalized_url for marker in ("size-chart", "size_chart", "sizechart", "measurement")):
+        IMAGE_PREFLIGHT_CACHE[image_url] = "Rejected before AI Vision: Zendrop image looks like a size chart"
+        return IMAGE_PREFLIGHT_CACHE[image_url]
+    try:
+        with httpx.Client(timeout=10, follow_redirects=True) as http_client:
+            response = http_client.get(image_url)
+            response.raise_for_status()
+            content_type = response.headers.get("content-type", "")
+            if "image" not in content_type and not image_url.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+                IMAGE_PREFLIGHT_CACHE[image_url] = None
+                return None
+            is_size_chart = is_likely_size_chart_image(response.content)
+    except Exception:
+        IMAGE_PREFLIGHT_CACHE[image_url] = None
+        return None
+    IMAGE_PREFLIGHT_CACHE[image_url] = (
+        "Rejected before AI Vision: Zendrop image looks like a size chart" if is_size_chart else None
+    )
+    return IMAGE_PREFLIGHT_CACHE[image_url]
+
+
+def is_likely_size_chart_image(image_bytes: bytes) -> bool:
+    try:
+        image = Image.open(BytesIO(image_bytes)).convert("L")
+    except (UnidentifiedImageError, OSError):
+        return False
+    image.thumbnail((260, 260))
+    width, height = image.size
+    if width < 80 or height < 80:
+        return False
+    pixels = list(image.getdata())
+    total_pixels = len(pixels)
+    light_ratio = sum(1 for pixel in pixels if pixel >= 220) / total_pixels
+    dark_ratio = sum(1 for pixel in pixels if pixel <= 90) / total_pixels
+    if light_ratio < 0.45 or dark_ratio < 0.01:
+        return False
+    rows = [[pixels[row * width + column] for column in range(width)] for row in range(height)]
+    columns = [[pixels[row * width + column] for row in range(height)] for column in range(width)]
+    horizontal_lines = sum(1 for row in rows if sum(1 for pixel in row if pixel <= 120) / width >= 0.42)
+    vertical_lines = sum(1 for column in columns if sum(1 for pixel in column if pixel <= 120) / height >= 0.32)
+    return horizontal_lines >= 4 and vertical_lines >= 3
 
 
 def store_rejected_candidates(
@@ -606,7 +676,9 @@ def classify_visual_verdict(payload: dict[str, Any]) -> str | None:
         return "text_only" if bool(payload.get("same_product")) else None
     if payload.get("zendrop_image_is_product_photo") is False:
         return None
-    hard_keys = (
+    confidence = verdict_confidence(payload)
+    secondary_matches = visual_secondary_match_count(payload)
+    strict_keys = (
         "category_match",
         "silhouette_match",
         "color_match",
@@ -616,21 +688,29 @@ def classify_visual_verdict(payload: dict[str, Any]) -> str | None:
         "season_match",
         "variant_match",
     )
-    if any(payload.get(key) is not True for key in hard_keys):
-        return None
-    confidence = verdict_confidence(payload)
-    secondary_matches = visual_secondary_match_count(payload)
-    if bool(payload.get("same_product")) and confidence >= VISION_PASS_CONFIDENCE:
-        return "vision_pass" if secondary_matches >= 6 else "vision_review"
-    if bool(payload.get("same_product")) and confidence >= VISION_REVIEW_CONFIDENCE:
-        return "vision_review"
-    if confidence >= VISION_NEAR_REVIEW_CONFIDENCE and secondary_matches >= 6:
-        return "vision_review"
-    if payload.get("same_product") is False:
-        return None
-    if confidence >= VISION_REVIEW_CONFIDENCE:
+    if (
+        bool(payload.get("same_product"))
+        and confidence >= VISION_PASS_CONFIDENCE
+        and all(payload.get(key) is True for key in strict_keys)
+    ):
+        return "vision_pass"
+    if is_manual_review_candidate(payload, confidence=confidence, secondary_matches=secondary_matches):
         return "vision_review"
     return None
+
+
+def is_manual_review_candidate(payload: dict[str, Any], confidence: float, secondary_matches: int) -> bool:
+    if confidence < VISION_SOFT_REVIEW_CONFIDENCE:
+        return False
+    if payload.get("category_match") is not True:
+        return False
+    if payload.get("length_match") is False:
+        return False
+    if payload.get("silhouette_match") is False and payload.get("key_details_match") is False:
+        return False
+    if secondary_matches < 4:
+        return False
+    return True
 
 
 def visual_secondary_match_count(payload: dict[str, Any]) -> int:

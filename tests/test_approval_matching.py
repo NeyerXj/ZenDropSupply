@@ -1,9 +1,13 @@
 import json
+from io import BytesIO
+
+from PIL import Image, ImageDraw
 
 from app.database import open_database
 from app.services import approval_matching
 from app.services.approval_matching import (
     build_approval_matches,
+    is_likely_size_chart_image,
     list_approval_cards,
     score_zendrop_candidate,
     search_query_provenance_score,
@@ -40,6 +44,30 @@ def full_visual_match(**overrides):
     }
     payload.update(overrides)
     return payload
+
+
+def test_likely_size_chart_image_detector_rejects_table_image():
+    image = Image.new("RGB", (420, 300), "white")
+    draw = ImageDraw.Draw(image)
+    for x_position in range(0, 421, 105):
+        draw.line((x_position, 0, x_position, 300), fill="black", width=2)
+    for y_position in range(0, 301, 50):
+        draw.line((0, y_position, 420, y_position), fill="black", width=2)
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+
+    assert is_likely_size_chart_image(buffer.getvalue()) is True
+
+
+def test_likely_size_chart_image_detector_allows_product_like_photo():
+    image = Image.new("RGB", (420, 300), "#d8c2aa")
+    draw = ImageDraw.Draw(image)
+    draw.ellipse((140, 30, 280, 260), fill="#1d2438")
+    draw.rectangle((170, 130, 250, 290), fill="#1d2438")
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+
+    assert is_likely_size_chart_image(buffer.getvalue()) is False
 
 
 def test_build_approval_matches_links_best_zendrop_candidate(tmp_path):
