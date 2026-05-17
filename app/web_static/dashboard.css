@@ -157,12 +157,21 @@ button:disabled {
   gap: 8px;
 }
 
+.sidebar-actions {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.sidebar-button {
+  width: 100%;
+}
+
 .logout-link {
   color: var(--muted);
   display: inline-flex;
   font-size: 13px;
   font-weight: 720;
-  margin-top: 18px;
   text-decoration: none;
 }
 

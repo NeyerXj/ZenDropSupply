@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import shutil
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -172,6 +173,38 @@ def cancel_approval_work(database, product_match_id: int, competitor_product_id:
     return canceled
 
 
+def reset_pipeline_workspace(database, storage_dir: Path) -> dict[str, int]:
+    tables = [
+        "shopify_draft_products",
+        "final_generated_images",
+        "final_image_sets",
+        "generated_images",
+        "generated_contents",
+        "product_matches",
+        "pipeline_jobs",
+        "uploaded_analytics_files",
+        "competitor_stores",
+        "pipeline_runs",
+        "competitor_products",
+        "zendrop_products",
+    ]
+    deleted_counts: dict[str, int] = {}
+    for table in tables:
+        deleted_counts[table] = database.execute(f"select count(*) from {table}").fetchone()[0]
+        database.execute(f"delete from {table}")
+    database.commit()
+    for dirname in ("analytics_uploads", "competitor_images", "generated_images", "final_model_images"):
+        directory = storage_dir / dirname
+        if not directory.exists():
+            continue
+        for child in directory.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink(missing_ok=True)
+    return deleted_counts
+
+
 LOGIN_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -238,7 +271,10 @@ DASHBOARD_HTML = """<!doctype html>
         </div>
       </div>
       <nav id="pipelineSteps" class="pipeline-steps" aria-label="Pipeline steps"></nav>
-      <a class="logout-link" href="/logout">Logout</a>
+      <div class="sidebar-actions">
+        <button id="resetPipelineButton" type="button" class="danger sidebar-button">Reset pipeline</button>
+        <a class="logout-link" href="/logout">Logout</a>
+      </div>
     </aside>
 
     <main class="workspace">
@@ -632,6 +668,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def run_approval_matching(_: None = Depends(require_admin), database=Depends(get_database)) -> dict:
         result = queue_approval_match_jobs(database=database)
         return {"count": result["jobs_queued"], **result}
+
+    @web_app.post("/api/admin/reset")
+    def reset_pipeline(_: None = Depends(require_admin), database=Depends(get_database)) -> dict:
+        deleted = reset_pipeline_workspace(database=database, storage_dir=app_settings.storage_dir)
+        return {"ok": True, "deleted": deleted}
 
     return web_app
 

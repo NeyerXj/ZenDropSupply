@@ -232,6 +232,77 @@ def test_dashboard_uploads_analytics_text_file(tmp_path):
     assert (tmp_path / "storage" / "analytics_uploads").exists()
 
 
+def test_dashboard_reset_clears_pipeline_state_but_keeps_filters(tmp_path):
+    settings = Settings(database_url=f"sqlite:///{tmp_path / 'pipeline.db'}", storage_dir=tmp_path / "storage")
+    image_path = settings.storage_dir / "competitor_images" / "source.jpg"
+    image_path.parent.mkdir(parents=True)
+    image_path.write_bytes(b"image")
+    generated_path = settings.storage_dir / "final_model_images" / "1" / "shot.jpg"
+    generated_path.parent.mkdir(parents=True)
+    generated_path.write_bytes(b"image")
+    with open_database(settings.database_url) as database:
+        database.execute(
+            """
+            insert into filter_configs (
+                name, women_keywords_json, male_keywords_json, summer_keywords_json, exclude_keywords_json, active
+            )
+            values ('default', '["women"]', '["men"]', '["summer"]', '["lingerie"]', 1)
+            """
+        )
+        database.execute("insert into pipeline_runs (name, status) values ('run', 'queued')")
+        database.execute(
+            """
+            insert into pipeline_jobs (run_id, stage, status, payload_json, result_json)
+            values (1, 'approval_match_product', 'running', '{}', '{}')
+            """
+        )
+        database.execute(
+            """
+            insert into competitor_products (
+                store_url, handle, title, image_path, tags_json, status, raw_json
+            )
+            values ('https://example.com', 'dress', 'Dress', ?, '[]', 'ready_for_zendrop', '{}')
+            """,
+            (str(image_path),),
+        )
+        database.execute("insert into zendrop_products (product_id, name, raw_json) values (2331830, 'Dress', '{}')")
+        database.execute(
+            """
+            insert into product_matches (
+                competitor_product_id, zendrop_product_id, zendrop_match_score, status
+            )
+            values (1, 2331830, 90, 'approval_pending')
+            """
+        )
+        database.execute(
+            """
+            insert into uploaded_analytics_files (run_id, filename, storage_path)
+            values (1, 'file.txt', 'storage/analytics_uploads/file.txt')
+            """
+        )
+        database.commit()
+
+    client = authenticated_client(settings)
+
+    response = client.post("/api/admin/reset")
+
+    assert response.status_code == 200
+    assert response.json()["deleted"]["competitor_products"] == 1
+    with open_database(settings.database_url) as database:
+        for table in [
+            "pipeline_jobs",
+            "pipeline_runs",
+            "competitor_products",
+            "zendrop_products",
+            "product_matches",
+            "uploaded_analytics_files",
+        ]:
+            assert database.execute(f"select count(*) from {table}").fetchone()[0] == 0
+        assert database.execute("select count(*) from filter_configs").fetchone()[0] == 1
+    assert not image_path.exists()
+    assert not generated_path.exists()
+
+
 def test_dashboard_builds_and_lists_approval_cards(tmp_path):
     settings = Settings(database_url=f"sqlite:///{tmp_path / 'pipeline.db'}", storage_dir=tmp_path / "storage")
     image_path = settings.storage_dir / "competitor_images" / "dress.jpg"

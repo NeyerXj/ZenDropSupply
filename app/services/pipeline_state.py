@@ -220,7 +220,7 @@ def claim_next_pipeline_job(database: sqlite3.Connection) -> dict | None:
 
 
 def complete_pipeline_job(database: sqlite3.Connection, job_id: int, result: dict[str, Any]) -> dict:
-    database.execute(
+    cursor = database.execute(
         """
         update pipeline_jobs
         set status = 'done', result_json = ?, error_message = null, updated_at = current_timestamp
@@ -229,11 +229,13 @@ def complete_pipeline_job(database: sqlite3.Connection, job_id: int, result: dic
         (json.dumps(result, ensure_ascii=False), job_id),
     )
     database.commit()
+    if not cursor.rowcount:
+        return {"id": job_id, "status": "reset", "result": result}
     return get_pipeline_job(database, job_id)
 
 
 def fail_pipeline_job(database: sqlite3.Connection, job_id: int, error_message: str) -> dict:
-    database.execute(
+    cursor = database.execute(
         """
         update pipeline_jobs
         set status = 'failed', error_message = ?, updated_at = current_timestamp
@@ -242,6 +244,8 @@ def fail_pipeline_job(database: sqlite3.Connection, job_id: int, error_message: 
         (error_message, job_id),
     )
     database.commit()
+    if not cursor.rowcount:
+        return {"id": job_id, "status": "reset", "error_message": error_message}
     return get_pipeline_job(database, job_id)
 
 

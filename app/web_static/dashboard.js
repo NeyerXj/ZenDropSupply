@@ -545,6 +545,27 @@ async function uploadDrafts() {
   }
 }
 
+async function resetPipeline() {
+  const button = document.getElementById("resetPipelineButton");
+  if (!window.confirm("Reset all pipeline data, jobs, matches, generated images and Shopify draft records? Keys and settings stay untouched.")) {
+    return;
+  }
+  const previousText = button.textContent;
+  try {
+    button.disabled = true;
+    button.textContent = "Resetting...";
+    const result = await fetchJson("/api/admin/reset", { method: "POST" });
+    const deletedTotal = Object.values(result.deleted || {}).reduce((total, count) => total + Number(count || 0), 0);
+    showToast(`Pipeline reset. ${deletedTotal} records removed.`);
+    await loadState();
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = previousText;
+  }
+}
+
 async function updateApprovalStatus(productMatchId, status) {
   const input = document.querySelector(`[data-manual-url="${productMatchId}"]`);
   const card = document.querySelector(`[data-match-id="${productMatchId}"]`)?.closest(".approval-card");
@@ -574,6 +595,7 @@ async function updateApprovalStatus(productMatchId, status) {
 document.getElementById("sourceSetupForm").addEventListener("submit", submitSourceSetup);
 document.getElementById("nextActionButton").addEventListener("click", runNextAction);
 document.getElementById("uploadDraftsButton").addEventListener("click", uploadDrafts);
+document.getElementById("resetPipelineButton").addEventListener("click", resetPipeline);
 
 Promise.all([loadFilterConfig(), loadState()]).catch((error) => showToast(error.message));
 
