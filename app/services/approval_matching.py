@@ -103,9 +103,10 @@ FOOTWEAR_WORDS = {
 }
 
 VISION_CANDIDATE_LIMIT = 12
-VISION_PASS_CONFIDENCE = 0.72
-VISION_REVIEW_CONFIDENCE = 0.55
-VISION_NEAR_REVIEW_CONFIDENCE = 0.35
+VISION_PASS_CONFIDENCE = 0.75
+VISION_REVIEW_CONFIDENCE = 0.60
+VISION_NEAR_REVIEW_CONFIDENCE = 0.60
+MIN_ZENDROP_IMAGE_COUNT = 2
 
 
 def build_approval_matches(
@@ -284,6 +285,7 @@ def build_zendrop_only_matches(
             vision_verdict,
         ) = candidate
         total_cost = (price_usd or 0) + (shipping_price_usd or 0)
+        suggested_price = round(total_cost * 3.0, 2)
         database.execute(
             """
             update zendrop_products
@@ -303,10 +305,11 @@ def build_zendrop_only_matches(
                 vision_reason,
                 vision_verdict_json,
                 total_cost_usd,
+                suggested_price_usd,
                 status,
                 updated_at
             )
-            values (?, ?, ?, ?, ?, ?, ?, ?, 'approval_pending', current_timestamp)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, 'approval_pending', current_timestamp)
             """,
             (
                 competitor_product_id,
@@ -317,6 +320,7 @@ def build_zendrop_only_matches(
                 vision_reason,
                 json.dumps(vision_verdict, ensure_ascii=False),
                 total_cost,
+                suggested_price,
             ),
         )
         matches_created += 1
@@ -398,6 +402,22 @@ def choose_vision_verified_candidate(
 ) -> tuple[tuple | None, list[dict[str, Any]]]:
     rejected_candidates: list[dict[str, Any]] = []
     for product_id, name, score, price_usd, shipping_price_usd, image_url, raw_json in candidates:
+        quality_reject_reason = candidate_quality_gate((product_id, name, score, price_usd, shipping_price_usd, image_url, raw_json))
+        if quality_reject_reason:
+            rejected_candidates.append(
+                {
+                    "product_id": product_id,
+                    "score": score,
+                    "price_usd": price_usd,
+                    "shipping_price_usd": shipping_price_usd,
+                    "image_url": image_url,
+                    "vision_confidence": 0.0,
+                    "vision_reason": quality_reject_reason,
+                    "vision_verdict": {"source": "quality_gate", "reason": quality_reject_reason},
+                    "reason": quality_reject_reason,
+                }
+            )
+            continue
         product_rejected = False
         for candidate_image_url in zendrop_product_image_urls(image_url=image_url, raw_json=raw_json):
             verdict = verify_visual_match(
@@ -438,6 +458,46 @@ def choose_vision_verified_candidate(
                 }
             )
     return None, rejected_candidates
+
+
+def candidate_quality_gate(candidate: tuple) -> str | None:
+    product_id, name, _score, price_usd, shipping_price_usd, image_url, raw_json = candidate
+    if price_usd is None or float(price_usd) <= 0:
+        return "Rejected before approval: missing Zendrop price"
+    if shipping_price_usd is None or float(shipping_price_usd) < 0:
+        return "Rejected before approval: missing shipping to Canada"
+    image_urls = zendrop_product_image_urls(image_url=image_url, raw_json=raw_json)
+    if len(image_urls) < MIN_ZENDROP_IMAGE_COUNT:
+        return f"Rejected before approval: only {len(image_urls)} Zendrop product image(s)"
+    if not has_size_or_variant_info(name=name, raw_json=raw_json):
+        return "Rejected before approval: missing size or variant information"
+    return None
+
+
+def has_size_or_variant_info(name: str, raw_json: str | None) -> bool:
+    try:
+        raw = json.loads(raw_json or "{}")
+    except json.JSONDecodeError:
+        raw = {}
+    for key in ("variants", "options", "sizes", "colors", "attributes"):
+        value = raw.get(key)
+        if isinstance(value, list) and value:
+            return True
+        if isinstance(value, dict) and value:
+            return True
+    description = str(raw.get("description") or "")
+    haystack = normalize_size_text(f"{name} {description}")
+    patterns = [
+        r"\b(one size|plus size)\b",
+        r"\b(size|sizes)\s*[:=]?\s*[a-z0-9,\- ]{1,80}",
+        r"\b(us|uk|eu)\s*\d{1,2}\s*(?:-|to)?\s*\d{0,2}\b",
+        r"\b(xs|s|m|l|xl|xxl|xxxl|2xl|3xl|4xl)\b",
+    ]
+    return any(re.search(pattern, haystack) for pattern in patterns)
+
+
+def normalize_size_text(value: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", value.lower())).strip()
 
 
 def store_rejected_candidates(
@@ -534,13 +594,11 @@ def verify_visual_match(
                         "You are an ecommerce product visual matcher for supplier sourcing. Return JSON only. "
                         "The second image must be a real product photo. Reject size charts, measurement tables, "
                         "text-heavy guide images, packaging-only images, or images where the wearable product is not visible. "
-                        "A match does not need to be identical. Compare weighted criteria: product type, color, silhouette, "
-                        "material, size/variant compatibility, key details, and overall look. Product type and silhouette "
-                        "matter most. Color, material, pattern, and small detail differences lower confidence but do not "
-                        "automatically reject when the overall sellable product is close. Pass strong close matches at 0.72+. "
-                        "Use 0.55-0.71 for good manual-review candidates. Use 0.35-0.54 only when type and silhouette match "
-                        "but some details differ. Reject clearly different product types, clearly different silhouettes/cuts, "
-                        "different shoe construction, or different overall product families."
+                        "A match does not need to be identical, but these fields must match before manual approval: "
+                        "product category, silhouette, primary color family, visible fabric/material type, length, "
+                        "key competitor detail, seasonality, and size/color variant compatibility. Hard reject pants vs skirt, "
+                        "dress vs top, different color family, visibly different material, missing key detail, very different fit, "
+                        "or poor Zendrop images. Pass strong close matches at 0.75+. Use 0.60-0.74 only for manual-review candidates."
                     ),
                     "input": [
                         {
@@ -552,7 +610,7 @@ def verify_visual_match(
                                         "Return JSON with keys same_product boolean, confidence number 0-1, "
                                         "zendrop_image_is_product_photo boolean, "
                                         "category_match, silhouette_match, color_match, material_match, pattern_match, "
-                                        "closure_match, variant_match, key_details_match booleans, "
+                                        "length_match, closure_match, variant_match, key_details_match, season_match booleans, "
                                         f"reason string. Competitor title: {competitor_title}. Zendrop title: {zendrop_name or zendrop_title}."
                                     ),
                                 },
@@ -577,21 +635,25 @@ def classify_visual_verdict(payload: dict[str, Any]) -> str | None:
         return "text_only" if bool(payload.get("same_product")) else None
     if payload.get("zendrop_image_is_product_photo") is False:
         return None
-    if payload.get("category_match") is False:
+    hard_keys = (
+        "category_match",
+        "silhouette_match",
+        "color_match",
+        "material_match",
+        "length_match",
+        "key_details_match",
+        "season_match",
+        "variant_match",
+    )
+    if any(payload.get(key) is not True for key in hard_keys):
         return None
     confidence = verdict_confidence(payload)
     secondary_matches = visual_secondary_match_count(payload)
-    strong_shape_match = payload.get("silhouette_match") is not False
     if bool(payload.get("same_product")) and confidence >= VISION_PASS_CONFIDENCE:
-        return "vision_pass" if strong_shape_match and secondary_matches >= 1 else "vision_review"
+        return "vision_pass" if secondary_matches >= 6 else "vision_review"
     if bool(payload.get("same_product")) and confidence >= VISION_REVIEW_CONFIDENCE:
         return "vision_review"
-    if (
-        confidence >= VISION_NEAR_REVIEW_CONFIDENCE
-        and payload.get("category_match") is True
-        and payload.get("silhouette_match") is True
-        and secondary_matches >= 1
-    ):
+    if confidence >= VISION_NEAR_REVIEW_CONFIDENCE and secondary_matches >= 6:
         return "vision_review"
     if payload.get("same_product") is False:
         return None
@@ -604,10 +666,12 @@ def visual_secondary_match_count(payload: dict[str, Any]) -> int:
     keys = (
         "color_match",
         "material_match",
+        "length_match",
         "pattern_match",
         "closure_match",
         "variant_match",
         "key_details_match",
+        "season_match",
     )
     return sum(1 for key in keys if payload.get(key) is True)
 
@@ -779,6 +843,7 @@ def list_approval_cards(database: sqlite3.Connection, storage_dir: Path, limit: 
             pm.vision_confidence,
             pm.vision_reason,
             pm.total_cost_usd,
+            pm.suggested_price_usd,
             pm.manual_supplier_url,
             cp.id,
             cp.title,
@@ -808,22 +873,23 @@ def list_approval_cards(database: sqlite3.Connection, storage_dir: Path, limit: 
             "zendrop_match_score": row[3],
             "vision_confidence": row[4],
             "vision_reason": row[5],
-            "manual_supplier_url": row[7],
+            "manual_supplier_url": row[8],
             "competitor": {
-                "id": row[8],
-                "title": row[9],
-                "price": row[10],
-                "image_url": media_url_for_path(row[11], storage_dir),
+                "id": row[9],
+                "title": row[10],
+                "price": row[11],
+                "image_url": media_url_for_path(row[12], storage_dir),
             },
             "zendrop": {
-                "product_id": row[12],
-                "name": row[13],
-                "image_url": row[14],
-                "price_usd": row[15],
-                "shipping_country_code": row[16],
-                "shipping_price_usd": row[17],
-                "shipping_estimated_delivery": row[18],
+                "product_id": row[13],
+                "name": row[14],
+                "image_url": row[15],
+                "price_usd": row[16],
+                "shipping_country_code": row[17],
+                "shipping_price_usd": row[18],
+                "shipping_estimated_delivery": row[19],
                 "total_cost_usd": row[6],
+                "suggested_price_usd": row[7],
             },
         }
         for row in rows

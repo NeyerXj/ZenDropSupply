@@ -11,6 +11,37 @@ from app.services.approval_matching import (
 from app.services.visual_search_queries import VISUAL_QUERY_CACHE_KEY
 
 
+def valid_zendrop_raw(*image_urls: str, extra: dict | None = None) -> str:
+    payload = {
+        "images": [{"url": image_url} for image_url in image_urls],
+        "description": "Size: XS S M L XL. Available colors: red, burgundy, black.",
+    }
+    if extra:
+        payload.update(extra)
+    return json.dumps(payload)
+
+
+def full_visual_match(**overrides):
+    payload = {
+        "same_product": True,
+        "confidence": 0.86,
+        "source": "openai_vision",
+        "zendrop_image_is_product_photo": True,
+        "category_match": True,
+        "silhouette_match": True,
+        "color_match": True,
+        "material_match": True,
+        "length_match": True,
+        "key_details_match": True,
+        "season_match": True,
+        "variant_match": True,
+        "pattern_match": True,
+        "closure_match": True,
+    }
+    payload.update(overrides)
+    return payload
+
+
 def test_build_approval_matches_links_best_zendrop_candidate(tmp_path):
     database_url = f"sqlite:///{tmp_path / 'pipeline.db'}"
     image_path = tmp_path / "storage" / "competitor_images" / "dress.jpg"
@@ -48,7 +79,7 @@ def test_build_approval_matches_links_best_zendrop_candidate(tmp_path):
                 "Floral Maxi Dress for Women",
                 12.5,
                 "https://file.zendrop.com/dress.webp",
-                json.dumps({"id": 2331830}),
+                valid_zendrop_raw("https://file.zendrop.com/dress.webp", "https://file.zendrop.com/dress-back.webp"),
                 "ca",
                 10.0,
             ),
@@ -79,6 +110,14 @@ def test_build_approval_matches_skips_zendrop_size_chart_image(tmp_path, monkeyp
             "confidence": 0.91,
             "source": "openai_vision",
             "zendrop_image_is_product_photo": image_url.endswith("product.webp"),
+            "category_match": image_url.endswith("product.webp"),
+            "silhouette_match": image_url.endswith("product.webp"),
+            "color_match": image_url.endswith("product.webp"),
+            "material_match": image_url.endswith("product.webp"),
+            "length_match": image_url.endswith("product.webp"),
+            "key_details_match": image_url.endswith("product.webp"),
+            "season_match": image_url.endswith("product.webp"),
+            "variant_match": image_url.endswith("product.webp"),
         }
 
     monkeypatch.setattr(approval_matching, "verify_visual_match", fake_visual_match)
@@ -115,13 +154,14 @@ def test_build_approval_matches_skips_zendrop_size_chart_image(tmp_path, monkeyp
                 6.06,
                 "https://file.zendrop.com/size-chart.webp",
                 json.dumps(
-                    {
-                        "images": [
-                            {"url": "https://file.zendrop.com/size-chart.webp"},
-                            {"url": "https://file.zendrop.com/product.webp"},
-                        ]
-                    }
-                ),
+                        {
+                            "images": [
+                                {"url": "https://file.zendrop.com/size-chart.webp"},
+                                {"url": "https://file.zendrop.com/product.webp"},
+                            ],
+                            "description": "Size: XS S M L XL. Available colors: red, burgundy, black.",
+                        }
+                    ),
                 "ca",
                 6.29,
             ),
@@ -187,7 +227,7 @@ def test_build_approval_matches_does_not_create_card_when_vision_rejects(tmp_pat
                 "Halter Neck Mesh Maxi Dress",
                 6.06,
                 "https://file.zendrop.com/product.webp",
-                json.dumps({"images": [{"url": "https://file.zendrop.com/product.webp"}]}),
+                valid_zendrop_raw("https://file.zendrop.com/product.webp", "https://file.zendrop.com/product-back.webp"),
                 "ca",
                 6.29,
             ),
@@ -222,8 +262,13 @@ def test_build_approval_matches_creates_manual_review_card_for_fallback_vision_s
             "source": "openai_vision",
             "zendrop_image_is_product_photo": True,
             "category_match": True,
-            "silhouette_match": False,
-            "color_match": False,
+            "silhouette_match": True,
+            "color_match": True,
+            "material_match": True,
+            "length_match": True,
+            "key_details_match": True,
+            "season_match": True,
+            "variant_match": True,
             "reason": "Close enough for manual approval",
         }
 
@@ -260,7 +305,7 @@ def test_build_approval_matches_creates_manual_review_card_for_fallback_vision_s
                 "Halter Neck Mesh Maxi Dress",
                 6.06,
                 "https://file.zendrop.com/product.webp",
-                json.dumps({"images": [{"url": "https://file.zendrop.com/product.webp"}]}),
+                valid_zendrop_raw("https://file.zendrop.com/product.webp", "https://file.zendrop.com/product-back.webp"),
                 "ca",
                 6.29,
             ),
@@ -377,7 +422,11 @@ def test_build_approval_matches_rejects_review_score_when_vision_says_not_same_p
     monkeypatch.setattr(approval_matching, "verify_visual_match", fake_visual_match)
 
     source_raw = json.dumps({VISUAL_QUERY_CACHE_KEY: ["white wide leg jumpsuit"]})
-    zendrop_raw = json.dumps({"_ttd_search_queries": ["white wide leg jumpsuit"]})
+    zendrop_raw = valid_zendrop_raw(
+        "https://file.zendrop.com/dress.webp",
+        "https://file.zendrop.com/dress-back.webp",
+        extra={"_ttd_search_queries": ["white wide leg jumpsuit"]},
+    )
 
     with open_database(database_url) as database:
         database.execute(
@@ -437,7 +486,7 @@ def test_build_approval_matches_rejects_review_score_when_vision_says_not_same_p
     )
 
 
-def test_build_approval_matches_allows_near_review_when_silhouette_matches(tmp_path, monkeypatch):
+def test_build_approval_matches_rejects_near_review_when_color_mismatches(tmp_path, monkeypatch):
     database_url = f"sqlite:///{tmp_path / 'pipeline.db'}"
     image_path = tmp_path / "storage" / "competitor_images" / "dress.jpg"
     image_path.parent.mkdir(parents=True)
@@ -503,10 +552,8 @@ def test_build_approval_matches_allows_near_review_when_silhouette_matches(tmp_p
         result = build_approval_matches(database=database, min_score=62)
         cards = list_approval_cards(database=database, storage_dir=tmp_path / "storage")
 
-    assert result == {"matches_created": 1}
-    assert cards[0]["status"] == "approval_pending"
-    assert cards[0]["visual_status"] == "vision_review"
-    assert cards[0]["vision_confidence"] == 0.42
+    assert result == {"matches_created": 0}
+    assert cards == []
 
 
 def test_build_approval_matches_uses_zendrop_search_query_provenance(tmp_path, monkeypatch):
@@ -516,16 +563,7 @@ def test_build_approval_matches_uses_zendrop_search_query_provenance(tmp_path, m
     image_path.write_bytes(b"image")
 
     def fake_visual_match(**kwargs):
-        return {
-            "same_product": True,
-            "confidence": 0.85,
-            "source": "openai_vision",
-            "zendrop_image_is_product_photo": True,
-            "category_match": True,
-            "silhouette_match": True,
-            "color_match": True,
-            "reason": "Same black orthopedic slip-on sneaker",
-        }
+        return full_visual_match(confidence=0.85, reason="Same black orthopedic slip-on sneaker")
 
     monkeypatch.setattr(approval_matching, "verify_visual_match", fake_visual_match)
 
@@ -533,7 +571,11 @@ def test_build_approval_matches_uses_zendrop_search_query_provenance(tmp_path, m
     zendrop_raw = json.dumps(
         {
             "_ttd_search_queries": ["women orthopedic slip on shoes"],
-            "images": [{"url": "https://file.zendrop.com/shoe.webp"}],
+            "images": [
+                {"url": "https://file.zendrop.com/shoe.webp"},
+                {"url": "https://file.zendrop.com/shoe-side.webp"},
+            ],
+            "description": "Size: US 6 7 8 9 10. Available colors: black.",
         }
     )
 
@@ -597,8 +639,13 @@ def test_build_approval_matches_retries_next_candidate_after_rejected_zendrop_it
             "source": "openai_vision",
             "zendrop_image_is_product_photo": True,
             "category_match": True,
-            "silhouette_match": True,
-            "color_match": True,
+            "silhouette_match": image_url.endswith("second.webp"),
+            "color_match": image_url.endswith("second.webp"),
+            "material_match": image_url.endswith("second.webp"),
+            "length_match": image_url.endswith("second.webp"),
+            "key_details_match": image_url.endswith("second.webp"),
+            "season_match": image_url.endswith("second.webp"),
+            "variant_match": image_url.endswith("second.webp"),
         }
 
     monkeypatch.setattr(approval_matching, "verify_visual_match", fake_visual_match)
@@ -628,9 +675,14 @@ def test_build_approval_matches_retries_next_candidate_after_rejected_zendrop_it
                 product_id, name, price_usd, image_url, raw_json, shipping_country_code, shipping_price_usd
             )
             values
-                (1001, 'Red Strapless Maxi Dress', 10.0, 'https://file.zendrop.com/first.webp', '{}', 'ca', 5.0),
-                (1002, 'Red Strapless Maxi Dress', 12.0, 'https://file.zendrop.com/second.webp', '{}', 'ca', 6.0)
+                (1001, 'Red Strapless Maxi Dress', 10.0, 'https://file.zendrop.com/first.webp', ?, 'ca', 5.0),
+                (1002, 'Red Strapless Maxi Dress', 12.0, 'https://file.zendrop.com/second.webp', ?, 'ca', 6.0)
             """
+            ,
+            (
+                valid_zendrop_raw("https://file.zendrop.com/first.webp", "https://file.zendrop.com/first-back.webp"),
+                valid_zendrop_raw("https://file.zendrop.com/second.webp", "https://file.zendrop.com/second-back.webp"),
+            ),
         )
         database.execute(
             """
@@ -673,7 +725,10 @@ def test_build_approval_matches_checks_more_than_first_five_candidates(tmp_path,
             "silhouette_match": is_target,
             "color_match": is_target,
             "material_match": is_target,
+            "length_match": is_target,
             "key_details_match": is_target,
+            "season_match": is_target,
+            "variant_match": is_target,
             "reason": "Candidate 6 is the first close visual match" if is_target else "Different dress",
         }
 
@@ -711,7 +766,10 @@ def test_build_approval_matches_checks_more_than_first_five_candidates(tmp_path,
                     "Red Strapless Maxi Dress",
                     10.0,
                     f"https://file.zendrop.com/candidate-{product_id - 1000}.webp",
-                    "{}",
+                    valid_zendrop_raw(
+                        f"https://file.zendrop.com/candidate-{product_id - 1000}.webp",
+                        f"https://file.zendrop.com/candidate-{product_id - 1000}-back.webp",
+                    ),
                     "ca",
                     5.0,
                 ),
@@ -742,8 +800,18 @@ def test_build_approval_matches_uses_zendrop_only(tmp_path):
             insert into zendrop_products (
                 product_id, name, price_usd, image_url, raw_json, shipping_country_code, shipping_price_usd
             )
-            values (2807078, 'Women Elegant Maxi Dress', 18.0, 'https://file.zendrop.com/maxi.jpg', '{}', 'ca', 9.0)
+            values (?, ?, ?, ?, ?, ?, ?)
             """
+            ,
+            (
+                2807078,
+                "Women Elegant Maxi Dress",
+                18.0,
+                "https://file.zendrop.com/maxi.jpg",
+                valid_zendrop_raw("https://file.zendrop.com/maxi.jpg", "https://file.zendrop.com/maxi-back.jpg"),
+                "ca",
+                9.0,
+            ),
         )
         database.commit()
 
@@ -753,6 +821,7 @@ def test_build_approval_matches_uses_zendrop_only(tmp_path):
     assert result == {"matches_created": 1}
     assert cards[0]["zendrop"]["product_id"] == 2807078
     assert cards[0]["zendrop"]["total_cost_usd"] == 27.0
+    assert cards[0]["zendrop"]["suggested_price_usd"] == 81.0
 
 
 def test_build_approval_matches_rejects_low_confidence_zendrop_candidate(tmp_path):

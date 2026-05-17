@@ -14,6 +14,7 @@ from app.providers.gemini_images import GeminiImageClient
 from app.providers.openai_content import OpenAIContentClient
 from app.providers.zendrop import ZendropMcpClient
 from app.services.approval_matching import (
+    VISION_CANDIDATE_LIMIT,
     build_approval_matches,
     find_top_zendrop_matches,
     match_source_queries,
@@ -202,6 +203,7 @@ class PipelineWorker:
         return result
 
     async def run_approval_match_product(self, job: dict, payload: dict[str, Any]) -> dict[str, Any]:
+        await self.fill_shortlist_shipping(int(payload["competitor_product_id"]))
         with open_database(self.settings.database_url) as database:
             result = build_approval_matches(
                 database=database,
@@ -216,6 +218,78 @@ class PipelineWorker:
         if result.get("matches_created"):
             await self.fill_selected_match_shipping(int(payload["competitor_product_id"]))
         return result
+
+    async def fill_shortlist_shipping(self, competitor_product_id: int) -> None:
+        with open_database(self.settings.database_url) as database:
+            product_row = database.execute(
+                """
+                select title, raw_json
+                from competitor_products
+                where id = ?
+                """,
+                (competitor_product_id,),
+            ).fetchone()
+            if product_row is None:
+                return
+            zendrop_rows = database.execute(
+                """
+                select product_id, name, price_usd, shipping_price_usd, image_url, raw_json
+                from zendrop_products
+                order by updated_at desc, product_id desc
+                """
+            ).fetchall()
+            rejected_zendrop_ids = {
+                row[0]
+                for row in database.execute(
+                    """
+                    select zendrop_product_id
+                    from product_matches
+                    where competitor_product_id = ? and status = 'rejected'
+                    """,
+                    (competitor_product_id,),
+                ).fetchall()
+            }
+            candidates = find_top_zendrop_matches(
+                search_text=zendrop_search_text(product_row[0]),
+                zendrop_rows=zendrop_rows,
+                min_score=0,
+                excluded_product_ids=rejected_zendrop_ids,
+                limit=VISION_CANDIDATE_LIMIT,
+                source_queries=match_source_queries(product_row[0], product_row[1]),
+            )
+            missing_shipping = [
+                (int(product_id), price_usd)
+                for product_id, _name, _score, price_usd, shipping_price_usd, _image_url, _raw_json in candidates
+                if price_usd is not None and shipping_price_usd is None
+            ]
+        if not missing_shipping:
+            return
+        async with httpx.AsyncClient(timeout=45) as http_client:
+            client = ZendropMcpClient(settings=self.settings.zendrop, http_client=http_client)
+            with open_database(self.settings.database_url) as database:
+                for zendrop_product_id, _price_usd in missing_shipping:
+                    try:
+                        estimate = await client.get_shipping_estimate(
+                            product_id=zendrop_product_id,
+                            country_code=self.settings.zendrop.default_country_code,
+                        )
+                    except Exception:
+                        continue
+                    cheapest = estimate.cheapest_option
+                    if cheapest is None:
+                        continue
+                    database.execute(
+                        """
+                        update zendrop_products
+                        set shipping_country_code = ?,
+                            shipping_price_usd = ?,
+                            shipping_estimated_delivery = ?,
+                            updated_at = current_timestamp
+                        where product_id = ?
+                        """,
+                        (estimate.country_code, cheapest.price, cheapest.estimated_delivery, zendrop_product_id),
+                    )
+                database.commit()
 
     async def fill_selected_match_shipping(self, competitor_product_id: int) -> None:
         async with httpx.AsyncClient(timeout=45) as http_client:
