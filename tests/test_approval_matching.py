@@ -2,7 +2,12 @@ import json
 
 from app.database import open_database
 from app.services import approval_matching
-from app.services.approval_matching import build_approval_matches, list_approval_cards, score_zendrop_candidate
+from app.services.approval_matching import (
+    build_approval_matches,
+    list_approval_cards,
+    score_zendrop_candidate,
+    search_query_provenance_score,
+)
 from app.services.visual_search_queries import VISUAL_QUERY_CACHE_KEY
 
 
@@ -349,6 +354,161 @@ def test_build_approval_matches_rejects_fallback_when_category_mismatches(tmp_pa
     assert cards == []
 
 
+def test_build_approval_matches_rejects_review_score_when_vision_says_not_same_product(tmp_path, monkeypatch):
+    database_url = f"sqlite:///{tmp_path / 'pipeline.db'}"
+    image_path = tmp_path / "storage" / "competitor_images" / "jumpsuit.jpg"
+    image_path.parent.mkdir(parents=True)
+    image_path.write_bytes(b"image")
+
+    def fake_visual_match(**kwargs):
+        return {
+            "same_product": False,
+            "confidence": 0.65,
+            "source": "openai_vision",
+            "zendrop_image_is_product_photo": True,
+            "category_match": True,
+            "silhouette_match": False,
+            "color_match": False,
+            "pattern_match": False,
+            "closure_match": False,
+            "reason": "One is a wide-leg jumpsuit and the other is a fitted slit dress.",
+        }
+
+    monkeypatch.setattr(approval_matching, "verify_visual_match", fake_visual_match)
+
+    source_raw = json.dumps({VISUAL_QUERY_CACHE_KEY: ["white wide leg jumpsuit"]})
+    zendrop_raw = json.dumps({"_ttd_search_queries": ["white wide leg jumpsuit"]})
+
+    with open_database(database_url) as database:
+        database.execute(
+            """
+            insert into competitor_products (
+                store_url, handle, title, price, image_path, tags_json, status, raw_json
+            )
+            values (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "https://example.com",
+                "wide-leg-jumpsuit",
+                "Women's One-Piece Suit | Simple & Elegant | Form-Fitting Cut | Soft Fabric Blend",
+                39.95,
+                str(image_path),
+                "[]",
+                "ready_for_zendrop",
+                source_raw,
+            ),
+        )
+        database.execute(
+            """
+            insert into zendrop_products (
+                product_id, name, price_usd, image_url, raw_json, shipping_country_code, shipping_price_usd
+            )
+            values (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                2880001,
+                "Hawthaw Women's Elegant Summer Backless Dress (One Piece)",
+                7.38,
+                "https://file.zendrop.com/dress.webp",
+                zendrop_raw,
+                "ca",
+                8.43,
+            ),
+        )
+        database.commit()
+
+        result = build_approval_matches(database=database, min_score=62)
+        cards = list_approval_cards(database=database, storage_dir=tmp_path / "storage")
+        rejected_row = database.execute(
+            """
+            select status, visual_status, vision_confidence, vision_reason
+            from product_matches
+            where competitor_product_id = 1
+            """
+        ).fetchone()
+
+    assert result == {"matches_created": 0}
+    assert cards == []
+    assert rejected_row == (
+        "rejected",
+        "vision_rejected",
+        0.65,
+        "One is a wide-leg jumpsuit and the other is a fitted slit dress.",
+    )
+
+
+def test_build_approval_matches_allows_near_review_when_silhouette_matches(tmp_path, monkeypatch):
+    database_url = f"sqlite:///{tmp_path / 'pipeline.db'}"
+    image_path = tmp_path / "storage" / "competitor_images" / "dress.jpg"
+    image_path.parent.mkdir(parents=True)
+    image_path.write_bytes(b"image")
+
+    def fake_visual_match(**kwargs):
+        return {
+            "same_product": False,
+            "confidence": 0.42,
+            "source": "openai_vision",
+            "zendrop_image_is_product_photo": True,
+            "category_match": True,
+            "silhouette_match": True,
+            "color_match": False,
+            "pattern_match": True,
+            "closure_match": True,
+            "reason": "Same strapless maxi silhouette, different color.",
+        }
+
+    monkeypatch.setattr(approval_matching, "verify_visual_match", fake_visual_match)
+
+    source_raw = json.dumps({VISUAL_QUERY_CACHE_KEY: ["strapless maxi dress"]})
+    zendrop_raw = json.dumps({"_ttd_search_queries": ["strapless maxi dress"]})
+
+    with open_database(database_url) as database:
+        database.execute(
+            """
+            insert into competitor_products (
+                store_url, handle, title, price, image_path, tags_json, status, raw_json
+            )
+            values (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "https://example.com",
+                "strapless-maxi",
+                "Women's Maxi Dress | Strapless Cut & Flowing Silhouette",
+                52.95,
+                str(image_path),
+                "[]",
+                "ready_for_zendrop",
+                source_raw,
+            ),
+        )
+        database.execute(
+            """
+            insert into zendrop_products (
+                product_id, name, price_usd, image_url, raw_json, shipping_country_code, shipping_price_usd
+            )
+            values (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                2213233,
+                "GRACE KARIN Women Strapless Casual Loose Ruched Long Maxi Dress with Pockets Black",
+                12.0,
+                "https://file.zendrop.com/dress.webp",
+                zendrop_raw,
+                "ca",
+                8.0,
+            ),
+        )
+        database.commit()
+
+        result = build_approval_matches(database=database, min_score=62)
+        cards = list_approval_cards(database=database, storage_dir=tmp_path / "storage")
+
+    assert result == {"matches_created": 1}
+    assert cards[0]["status"] == "approval_pending"
+    assert cards[0]["visual_status"] == "vision_review"
+    assert cards[0]["vision_confidence"] == 0.42
+
+
 def test_build_approval_matches_uses_zendrop_search_query_provenance(tmp_path, monkeypatch):
     database_url = f"sqlite:///{tmp_path / 'pipeline.db'}"
     image_path = tmp_path / "storage" / "competitor_images" / "shoe.jpg"
@@ -575,6 +735,33 @@ def test_zendrop_match_score_rejects_wrong_category():
     )
 
     assert score == 0
+
+
+def test_zendrop_match_score_rejects_dress_pumps_for_dress_source():
+    score = score_zendrop_candidate(
+        "Red strapless maxi dress with side slit",
+        "benassal Women Dress Pumps Orthotic Heels Orthopedic Bunion Shoes",
+    )
+
+    assert score == 0
+
+
+def test_search_query_provenance_ignores_broad_gender_category_queries():
+    score = search_query_provenance_score(
+        ["women dress"],
+        json.dumps({"_ttd_search_queries": ["women dress"]}),
+    )
+
+    assert score == 0
+
+
+def test_search_query_provenance_boosts_specific_queries():
+    score = search_query_provenance_score(
+        ["black slip-on shoes"],
+        json.dumps({"_ttd_search_queries": ["black slip-on shoes"]}),
+    )
+
+    assert score == 86
 
 
 def test_zendrop_match_score_penalizes_wrong_shoe_style():

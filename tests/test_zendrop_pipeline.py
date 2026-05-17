@@ -65,7 +65,7 @@ async def test_zendrop_pipeline_persists_product_when_shipping_is_rate_limited(t
     )
 
     class FakeZendropClient:
-        async def search_products(self, keyword, limit):
+        async def search_products(self, keyword, page=1, limit=20):
             class Product:
                 product_id = 2331830
                 name = "Lace V-Neck Maxi Dress"
@@ -91,3 +91,50 @@ async def test_zendrop_pipeline_persists_product_when_shipping_is_rate_limited(t
 
     assert len(products) == 1
     assert rows == [(2331830, "Lace V-Neck Maxi Dress", 12.39, None)]
+
+
+@pytest.mark.asyncio
+async def test_zendrop_pipeline_can_search_multiple_pages_without_shipping(tmp_path):
+    settings = Settings(database_url=f"sqlite:///{tmp_path / 'pipeline.db'}")
+    shipping_calls = []
+    search_pages = []
+
+    class FakeZendropClient:
+        async def search_products(self, keyword, page=1, limit=20):
+            search_pages.append(page)
+
+            class Product:
+                def __init__(self, product_id):
+                    self.product_id = product_id
+                    self.name = f"Product {product_id}"
+                    self.description = None
+                    self.price_usd = 10.0
+                    self.image = "https://file.zendrop.com/product.webp"
+
+                def model_dump(self, mode):
+                    return {"id": self.product_id, "name": self.name}
+
+            class Result:
+                products = [Product(1000 + page)]
+
+            return Result()
+
+        async def get_shipping_estimate(self, product_id, country_code):
+            shipping_calls.append(product_id)
+            raise AssertionError("shipping should not be fetched during broad search")
+
+    async with open_database(settings.database_url) as database:
+        pipeline = ZendropPipeline(database=database, zendrop_client=FakeZendropClient())
+        products = await pipeline.search_and_store(
+            keyword="strapless maxi dress",
+            limit=20,
+            country_code="ca",
+            pages=2,
+            fetch_shipping=False,
+        )
+        rows = database.execute("select product_id, shipping_price_usd from zendrop_products order by product_id").fetchall()
+
+    assert [product.product_id for product in products] == [1001, 1002]
+    assert search_pages == [1, 2]
+    assert shipping_calls == []
+    assert rows == [(1001, None), (1002, None)]

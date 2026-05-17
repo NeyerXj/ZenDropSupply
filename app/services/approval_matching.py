@@ -66,8 +66,45 @@ ATTRIBUTE_WORDS = {
     "heels",
 }
 
+BROAD_PROVENANCE_QUERIES = {
+    "women dress",
+    "women dresses",
+    "women shoes",
+    "women sneakers",
+    "women sandals",
+    "women blouse",
+    "women top",
+    "women pants",
+    "women swimsuit",
+    "women jumpsuit",
+    "women set",
+}
+
+FOOTWEAR_WORDS = {
+    "shoe",
+    "shoes",
+    "sneaker",
+    "sneakers",
+    "footwear",
+    "sandal",
+    "sandals",
+    "pump",
+    "pumps",
+    "heel",
+    "heels",
+    "boot",
+    "boots",
+    "loafer",
+    "loafers",
+    "slipper",
+    "slippers",
+    "slide",
+    "slides",
+}
+
 VISION_PASS_CONFIDENCE = 0.75
 VISION_REVIEW_CONFIDENCE = 0.60
+VISION_NEAR_REVIEW_CONFIDENCE = 0.40
 
 
 def build_approval_matches(
@@ -331,7 +368,20 @@ def search_query_provenance_score(source_queries: list[str], zendrop_raw_json: s
         return 0.0
     source_query_set = {str(query).strip().lower() for query in source_queries}
     found_query_set = {str(query).strip().lower() for query in found_queries}
-    return 86.0 if source_query_set.intersection(found_query_set) else 0.0
+    for query in source_query_set.intersection(found_query_set):
+        if is_specific_provenance_query(query):
+            return 86.0
+    return 0.0
+
+
+def is_specific_provenance_query(query: str) -> bool:
+    normalized = re.sub(r"\s+", " ", query.strip().lower())
+    if normalized in BROAD_PROVENANCE_QUERIES:
+        return False
+    words = set(normalized.split())
+    if len(words) <= 2 and words.intersection({"women", "womens"}):
+        return False
+    return len(words) >= 3
 
 
 def match_source_queries(title: str, raw_json: str | None) -> list[str]:
@@ -529,6 +579,14 @@ def classify_visual_verdict(payload: dict[str, Any]) -> str | None:
     strict_match = all(payload.get(key) is not False for key in strict_keys)
     if bool(payload.get("same_product")) and confidence >= VISION_PASS_CONFIDENCE:
         return "vision_pass" if strict_match else "vision_review"
+    if (
+        confidence >= VISION_NEAR_REVIEW_CONFIDENCE
+        and payload.get("category_match") is True
+        and payload.get("silhouette_match") is True
+    ):
+        return "vision_review"
+    if payload.get("same_product") is False:
+        return None
     if confidence >= VISION_REVIEW_CONFIDENCE:
         return "vision_review"
     return None
@@ -613,12 +671,12 @@ def product_category(text: str) -> str | None:
     word_list = normalized_words(text)
     words = set(word_list)
     phrase = " ".join(word_list)
+    if words.intersection(FOOTWEAR_WORDS):
+        return "shoes"
     if words.intersection({"dress", "dresses", "gown"}) or "evening dress" in phrase:
         return "dress"
     if "skirt" in words:
         return "skirt"
-    if words.intersection({"shoe", "shoes", "sneaker", "sneakers", "footwear", "sandal", "sandals"}):
-        return "shoes"
     if words.intersection({"blouse", "shirt", "top", "pullover", "sweater"}):
         return "top"
     if words.intersection({"jacket", "blazer", "coat"}):

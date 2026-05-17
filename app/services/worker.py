@@ -40,6 +40,8 @@ from app.services.zendrop_pipeline import ZendropPipeline
 
 
 ZENDROP_API_LOCK_ID = 461122735
+ZENDROP_SEARCH_LIMIT = 20
+ZENDROP_SEARCH_PAGES = 2
 
 
 class PipelineWorker:
@@ -118,7 +120,8 @@ class PipelineWorker:
                             "keywords": zendrop_search_queries(title),
                             "competitor_product_id": product_id,
                             "source_title": title,
-                            "limit": 8,
+                            "limit": ZENDROP_SEARCH_LIMIT,
+                            "pages": ZENDROP_SEARCH_PAGES,
                             "country_code": self.settings.zendrop.default_country_code,
                         },
                         priority=110,
@@ -147,8 +150,10 @@ class PipelineWorker:
                         products.extend(
                             await pipeline.search_and_store(
                                 keyword=keyword,
-                                limit=int(payload.get("limit") or 8),
+                                limit=int(payload.get("limit") or ZENDROP_SEARCH_LIMIT),
                                 country_code=payload.get("country_code") or self.settings.zendrop.default_country_code,
+                                pages=int(payload.get("pages") or 1),
+                                fetch_shipping=False,
                             )
                         )
                     if competitor_product_id:
@@ -208,7 +213,57 @@ class PipelineWorker:
                 database=database,
                 competitor_product_id=int(payload["competitor_product_id"]),
             )
+        if result.get("matches_created"):
+            await self.fill_selected_match_shipping(int(payload["competitor_product_id"]))
         return result
+
+    async def fill_selected_match_shipping(self, competitor_product_id: int) -> None:
+        async with httpx.AsyncClient(timeout=45) as http_client:
+            client = ZendropMcpClient(settings=self.settings.zendrop, http_client=http_client)
+            with open_database(self.settings.database_url) as database:
+                rows = database.execute(
+                    """
+                    select pm.id, zp.product_id, zp.price_usd
+                    from product_matches pm
+                    join zendrop_products zp on zp.product_id = pm.zendrop_product_id
+                    where pm.competitor_product_id = ?
+                      and pm.status = 'approval_pending'
+                      and zp.shipping_price_usd is null
+                    """,
+                    (competitor_product_id,),
+                ).fetchall()
+                for match_id, zendrop_product_id, price_usd in rows:
+                    try:
+                        estimate = await client.get_shipping_estimate(
+                            product_id=int(zendrop_product_id),
+                            country_code=self.settings.zendrop.default_country_code,
+                        )
+                    except Exception:
+                        continue
+                    cheapest = estimate.cheapest_option
+                    if cheapest is None:
+                        continue
+                    total_cost = (price_usd or 0) + cheapest.price
+                    database.execute(
+                        """
+                        update zendrop_products
+                        set shipping_country_code = ?,
+                            shipping_price_usd = ?,
+                            shipping_estimated_delivery = ?,
+                            updated_at = current_timestamp
+                        where product_id = ?
+                        """,
+                        (estimate.country_code, cheapest.price, cheapest.estimated_delivery, zendrop_product_id),
+                    )
+                    database.execute(
+                        """
+                        update product_matches
+                        set total_cost_usd = ?, updated_at = current_timestamp
+                        where id = ?
+                        """,
+                        (total_cost, match_id),
+                    )
+                database.commit()
 
     async def run_openai_content(self, job: dict, payload: dict[str, Any]) -> dict[str, Any]:
         match_payload = self._load_content_payload(int(payload["product_match_id"]))

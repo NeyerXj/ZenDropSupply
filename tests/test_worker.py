@@ -127,8 +127,10 @@ async def test_zendrop_search_uses_cached_visual_queries_before_title_queries(tm
     settings = Settings(database_url=f"sqlite:///{tmp_path / 'pipeline.db'}")
     seen_keywords = []
 
-    async def fake_search_and_store(self, keyword, limit, country_code):
+    async def fake_search_and_store(self, keyword, limit, country_code, pages=1, fetch_shipping=True):
         seen_keywords.append(keyword)
+        assert pages == 1
+        assert fetch_shipping is False
         return []
 
     monkeypatch.setattr(ZendropPipeline, "search_and_store", fake_search_and_store)

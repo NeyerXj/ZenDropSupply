@@ -17,22 +17,32 @@ class ZendropPipeline:
         keyword: str,
         limit: int = 20,
         country_code: str = "ca",
+        pages: int = 1,
+        fetch_shipping: bool = True,
     ) -> list[ZendropProductSummary]:
-        search_result = await self.zendrop_client.search_products(keyword=keyword, limit=limit)
-        for product in search_result.products:
+        products: list[ZendropProductSummary] = []
+        for page in range(1, max(1, pages) + 1):
+            search_result = await self.zendrop_client.search_products(keyword=keyword, page=page, limit=limit)
+            products.extend(search_result.products)
+        for product in products:
             shipping_estimate = None
-            try:
-                await asyncio.sleep(0.35)
-                shipping_estimate = await self.zendrop_client.get_shipping_estimate(
-                    product_id=product.product_id,
-                    country_code=country_code,
-                )
-            except ZendropMcpError:
-                shipping_estimate = None
+            if fetch_shipping:
+                try:
+                    await asyncio.sleep(0.35)
+                    shipping_estimate = await self.zendrop_client.get_shipping_estimate(
+                        product_id=product.product_id,
+                        country_code=country_code,
+                    )
+                except ZendropMcpError:
+                    shipping_estimate = None
             cheapest_shipping = shipping_estimate.cheapest_option if shipping_estimate else None
             shipping_country_code = shipping_estimate.country_code if shipping_estimate else country_code
             raw_payload = product.model_dump(mode="json")
-            raw_payload["_ttd_search_queries"] = merge_raw_search_queries(raw_payload, keyword)
+            existing_raw_json = self.database.execute(
+                "select raw_json from zendrop_products where product_id = ?",
+                (product.product_id,),
+            ).fetchone()
+            raw_payload["_ttd_search_queries"] = merge_raw_search_queries(raw_payload, keyword, existing_raw_json[0] if existing_raw_json else None)
             self.database.execute(
                 """
                 insert into zendrop_products (
@@ -55,8 +65,8 @@ class ZendropPipeline:
                     image_url = excluded.image_url,
                     raw_json = excluded.raw_json,
                     shipping_country_code = excluded.shipping_country_code,
-                    shipping_price_usd = excluded.shipping_price_usd,
-                    shipping_estimated_delivery = excluded.shipping_estimated_delivery,
+                    shipping_price_usd = coalesce(excluded.shipping_price_usd, zendrop_products.shipping_price_usd),
+                    shipping_estimated_delivery = coalesce(excluded.shipping_estimated_delivery, zendrop_products.shipping_estimated_delivery),
                     updated_at = current_timestamp
                 """,
                 (
@@ -72,12 +82,19 @@ class ZendropPipeline:
                 ),
             )
         self.database.commit()
-        return search_result.products
+        return products
 
 
-def merge_raw_search_queries(raw_payload: dict, keyword: str) -> list[str]:
+def merge_raw_search_queries(raw_payload: dict, keyword: str, existing_raw_json: str | None = None) -> list[str]:
     existing = raw_payload.get("_ttd_search_queries")
     queries = existing if isinstance(existing, list) else []
+    try:
+        existing_raw = json.loads(existing_raw_json or "{}")
+    except json.JSONDecodeError:
+        existing_raw = {}
+    previous_queries = existing_raw.get("_ttd_search_queries")
+    if isinstance(previous_queries, list):
+        queries = [*previous_queries, *queries]
     result: list[str] = []
     seen: set[str] = set()
     for query in [*queries, keyword]:
