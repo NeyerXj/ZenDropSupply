@@ -5,6 +5,7 @@ const state = {
   approvalCards: [],
   finalProducts: [],
   competitorProducts: [],
+  resetArmedUntil: 0,
 };
 
 const labels = {
@@ -547,9 +548,19 @@ async function uploadDrafts() {
 
 async function resetPipeline() {
   const button = document.getElementById("resetPipelineButton");
-  if (!window.confirm("Reset all pipeline data, jobs, matches, generated images and Shopify draft records? Keys and settings stay untouched.")) {
+  const now = Date.now();
+  if (state.resetArmedUntil < now) {
+    state.resetArmedUntil = now + 8000;
+    button.textContent = "Click again to reset";
+    showToast("Reset is armed for 8 seconds. Click Reset pipeline again to clear pipeline data.");
+    window.setTimeout(() => {
+      if (state.resetArmedUntil < Date.now() && !button.disabled) {
+        button.textContent = "Reset pipeline";
+      }
+    }, 8200);
     return;
   }
+  state.resetArmedUntil = 0;
   const previousText = button.textContent;
   try {
     button.disabled = true;
