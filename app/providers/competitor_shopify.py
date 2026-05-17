@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlencode, urljoin, urlparse, urlunparse
 
 import httpx
 from pydantic import BaseModel, Field
@@ -47,7 +47,7 @@ class CompetitorShopifyClient:
     http_client: httpx.AsyncClient
 
     async def fetch_collection_handles(self, store_url: str, page: int) -> list[str]:
-        url = urljoin(store_url.rstrip("/") + "/", f"collections/all?sort_by=best-selling&page={page}")
+        url = collection_page_url(store_url=store_url, page=page)
         response = await self.http_client.get(url)
         response.raise_for_status()
         parser = ProductLinkParser()
@@ -55,7 +55,7 @@ class CompetitorShopifyClient:
         return parser.handles
 
     async def fetch_product(self, store_url: str, handle: str) -> CompetitorProduct:
-        url = urljoin(store_url.rstrip("/") + "/", f"products/{handle}.json")
+        url = urljoin(shop_base_url(store_url), f"products/{handle}.json")
         response = await self.http_client.get(url)
         response.raise_for_status()
         payload = response.json()
@@ -92,3 +92,23 @@ def _first_price(variants: list[dict[str, Any]]) -> float | None:
         return float(price)
     except (TypeError, ValueError):
         return None
+
+
+def collection_page_url(store_url: str, page: int) -> str:
+    parsed = urlparse(store_url)
+    clean_path = parsed.path.rstrip("/")
+    path_parts = [part for part in clean_path.split("/") if part]
+    if "collections" in path_parts:
+        path = clean_path
+    else:
+        locale_prefix = f"/{path_parts[0]}" if path_parts and len(path_parts[0]) == 2 else ""
+        path = f"{locale_prefix}/collections/all"
+    query = urlencode({"sort_by": "best-selling", "page": page})
+    return urlunparse((parsed.scheme, parsed.netloc, path, "", query, ""))
+
+
+def shop_base_url(store_url: str) -> str:
+    parsed = urlparse(store_url)
+    path_parts = [part for part in parsed.path.split("/") if part]
+    locale_prefix = f"/{path_parts[0]}" if path_parts and len(path_parts[0]) == 2 else ""
+    return urlunparse((parsed.scheme, parsed.netloc, f"{locale_prefix}/", "", "", ""))

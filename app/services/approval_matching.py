@@ -106,7 +106,6 @@ VISION_CANDIDATE_LIMIT = 12
 VISION_PASS_CONFIDENCE = 0.75
 VISION_REVIEW_CONFIDENCE = 0.60
 VISION_NEAR_REVIEW_CONFIDENCE = 0.60
-MIN_ZENDROP_IMAGE_COUNT = 2
 
 
 def build_approval_matches(
@@ -467,37 +466,9 @@ def candidate_quality_gate(candidate: tuple) -> str | None:
     if shipping_price_usd is None or float(shipping_price_usd) < 0:
         return "Rejected before approval: missing shipping to Canada"
     image_urls = zendrop_product_image_urls(image_url=image_url, raw_json=raw_json)
-    if len(image_urls) < MIN_ZENDROP_IMAGE_COUNT:
-        return f"Rejected before approval: only {len(image_urls)} Zendrop product image(s)"
-    if not has_size_or_variant_info(name=name, raw_json=raw_json):
-        return "Rejected before approval: missing size or variant information"
+    if not image_urls:
+        return "Rejected before approval: missing Zendrop product image"
     return None
-
-
-def has_size_or_variant_info(name: str, raw_json: str | None) -> bool:
-    try:
-        raw = json.loads(raw_json or "{}")
-    except json.JSONDecodeError:
-        raw = {}
-    for key in ("variants", "options", "sizes", "colors", "attributes"):
-        value = raw.get(key)
-        if isinstance(value, list) and value:
-            return True
-        if isinstance(value, dict) and value:
-            return True
-    description = str(raw.get("description") or "")
-    haystack = normalize_size_text(f"{name} {description}")
-    patterns = [
-        r"\b(one size|plus size)\b",
-        r"\b(size|sizes)\s*[:=]?\s*[a-z0-9,\- ]{1,80}",
-        r"\b(us|uk|eu)\s*\d{1,2}\s*(?:-|to)?\s*\d{0,2}\b",
-        r"\b(xs|s|m|l|xl|xxl|xxxl|2xl|3xl|4xl)\b",
-    ]
-    return any(re.search(pattern, haystack) for pattern in patterns)
-
-
-def normalize_size_text(value: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", value.lower())).strip()
 
 
 def store_rejected_candidates(

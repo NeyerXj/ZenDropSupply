@@ -201,3 +201,47 @@ async def test_competitor_pipeline_continues_pages_until_ready_target_is_reached
         ).fetchone()[0]
 
     assert ready_count == 2
+
+
+@pytest.mark.asyncio
+async def test_competitor_pipeline_uses_collection_url_without_appending_all_collection(tmp_path):
+    requested_urls: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested_urls.append(str(request.url))
+        if request.url.path == "/en/collections/topy-damski":
+            return httpx.Response(200, text='<a href="/en/products/summer-blouse">Blouse</a>')
+        if request.url.path == "/en/products/summer-blouse.json":
+            return httpx.Response(
+                200,
+                json={
+                    "product": {
+                        "id": 21,
+                        "handle": "summer-blouse",
+                        "title": "Summer Blouse Women",
+                        "product_type": "Blouses",
+                        "tags": ["Women", "Summer"],
+                        "image": None,
+                        "variants": [{"price": "39.99"}],
+                    }
+                },
+            )
+        raise AssertionError(f"Unexpected URL: {request.url}")
+
+    settings = Settings(database_url=f"sqlite:///{tmp_path / 'pipeline.db'}")
+
+    async with open_database(settings.database_url) as database:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+            client = CompetitorShopifyClient(http_client=http_client)
+            pipeline = CompetitorPipeline(
+                database=database,
+                client=client,
+                image_storage_dir=tmp_path / "competitor_images",
+            )
+            await pipeline.scrape_store("https://example.com/en/collections/topy-damski", pages=1, limit=1)
+
+        row = database.execute("select handle, status from competitor_products").fetchone()
+
+    assert row == ("summer-blouse", "ready_for_zendrop")
+    assert any("/en/collections/topy-damski?sort_by=best-selling&page=1" in url for url in requested_urls)
+    assert all("/collections/topy-damski/collections/all" not in url for url in requested_urls)
