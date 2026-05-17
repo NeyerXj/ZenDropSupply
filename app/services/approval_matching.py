@@ -14,7 +14,8 @@ from rapidfuzz import fuzz
 from app.config import OpenAISettings
 from app.services.dashboard import media_url_for_path
 from app.services.pipeline_state import enqueue_pipeline_job
-from app.services.search_terms import zendrop_search_text
+from app.services.search_terms import zendrop_search_queries, zendrop_search_text
+from app.services.visual_search_queries import cached_visual_search_queries
 
 
 COLOR_WORDS = {
@@ -120,7 +121,7 @@ def queue_approval_match_jobs(database: sqlite3.Connection, run_id: int | None =
     ).fetchall()
     rows = database.execute(
         """
-        select cp.id, cp.title
+        select cp.id, cp.title, cp.raw_json
         from competitor_products cp
         where cp.status in ('ready_for_zendrop', 'zendrop_matched')
           and not exists (
@@ -136,6 +137,7 @@ def queue_approval_match_jobs(database: sqlite3.Connection, run_id: int | None =
     for row in rows:
         product_id = int(row[0])
         product_title = row[1]
+        product_raw_json = row[2]
         if product_id in active_product_ids:
             continue
         rejected_zendrop_ids = {
@@ -155,6 +157,7 @@ def queue_approval_match_jobs(database: sqlite3.Connection, run_id: int | None =
             min_score=0,
             excluded_product_ids=rejected_zendrop_ids,
             limit=1,
+            source_queries=match_source_queries(product_title, product_raw_json),
         )
         if not candidates:
             skipped_no_candidates += 1
@@ -185,7 +188,7 @@ def build_zendrop_only_matches(
         parameters.extend(competitor_product_ids)
     competitor_rows = database.execute(
         f"""
-        select cp.id, cp.title, cp.image_path
+        select cp.id, cp.title, cp.image_path, cp.raw_json
         from competitor_products cp
         where cp.status in ('ready_for_zendrop', 'zendrop_matched')
           {product_filter}
@@ -200,7 +203,7 @@ def build_zendrop_only_matches(
         parameters,
     ).fetchall()
     matches_created = 0
-    for competitor_product_id, competitor_title, competitor_image_path in competitor_rows:
+    for competitor_product_id, competitor_title, competitor_image_path, competitor_raw_json in competitor_rows:
         rejected_zendrop_ids = {
             row[0]
             for row in database.execute(
@@ -218,6 +221,7 @@ def build_zendrop_only_matches(
             min_score=min_score,
             excluded_product_ids=rejected_zendrop_ids,
             limit=5,
+            source_queries=match_source_queries(competitor_title, competitor_raw_json),
         )
         candidate, rejected_candidates = choose_vision_verified_candidate(
             competitor_title=competitor_title,
@@ -295,6 +299,7 @@ def find_top_zendrop_matches(
     min_score: float,
     excluded_product_ids: set[int],
     limit: int,
+    source_queries: list[str] | None = None,
 ) -> list[tuple]:
     best_candidate = None
     best_score = 0.0
@@ -305,6 +310,8 @@ def find_top_zendrop_matches(
         if int(product_id) in excluded_product_ids:
             continue
         score = score_zendrop_candidate(search_text, name)
+        if source_queries:
+            score = max(score, search_query_provenance_score(source_queries, raw_json))
         if score >= required_score:
             candidates.append((product_id, name, score, price_usd, shipping_price_usd, image_url, raw_json))
             if score > best_score:
@@ -312,6 +319,23 @@ def find_top_zendrop_matches(
                 best_candidate = candidates[-1]
     candidates.sort(key=lambda candidate: candidate[2], reverse=True)
     return candidates[:limit]
+
+
+def search_query_provenance_score(source_queries: list[str], zendrop_raw_json: str | None) -> float:
+    try:
+        raw = json.loads(zendrop_raw_json or "{}")
+    except json.JSONDecodeError:
+        return 0.0
+    found_queries = raw.get("_ttd_search_queries")
+    if not isinstance(found_queries, list):
+        return 0.0
+    source_query_set = {str(query).strip().lower() for query in source_queries}
+    found_query_set = {str(query).strip().lower() for query in found_queries}
+    return 86.0 if source_query_set.intersection(found_query_set) else 0.0
+
+
+def match_source_queries(title: str, raw_json: str | None) -> list[str]:
+    return [*cached_visual_search_queries(raw_json), *zendrop_search_queries(title)]
 
 
 def choose_vision_verified_candidate(
@@ -498,6 +522,8 @@ def classify_visual_verdict(payload: dict[str, Any]) -> str | None:
         return "text_only" if bool(payload.get("same_product")) else None
     if payload.get("zendrop_image_is_product_photo") is False:
         return None
+    if payload.get("category_match") is False:
+        return None
     confidence = verdict_confidence(payload)
     strict_keys = ("category_match", "silhouette_match", "color_match")
     strict_match = all(payload.get(key) is not False for key in strict_keys)
@@ -516,6 +542,8 @@ def verdict_confidence(payload: dict[str, Any]) -> float:
 
 
 def score_zendrop_candidate(competitor_text: str, zendrop_name: str) -> float:
+    if incompatible_gender_or_shoe_type(competitor_text, zendrop_name):
+        return 0.0
     competitor_category = product_category(competitor_text)
     zendrop_category = product_category(zendrop_name)
     if competitor_category and zendrop_category and competitor_category != zendrop_category:
@@ -534,6 +562,23 @@ def score_zendrop_candidate(competitor_text: str, zendrop_name: str) -> float:
         missing_ratio = 1 - (len(overlap) / max(len(competitor_attributes), 1))
         score -= min(24, missing_ratio * 18)
     return max(0.0, score)
+
+
+def incompatible_gender_or_shoe_type(competitor_text: str, zendrop_name: str) -> bool:
+    competitor_words = set(normalized_words(competitor_text))
+    zendrop_words = set(normalized_words(zendrop_name))
+    wants_women = bool(competitor_words.intersection({"women", "womens", "woman", "female"}))
+    has_male_only = bool(zendrop_words.intersection({"men", "mens", "male", "boys", "boy"})) and not bool(
+        zendrop_words.intersection({"women", "womens", "woman", "female", "girls", "girl"})
+    )
+    if wants_women and has_male_only:
+        return True
+    source_is_closed_shoe = bool(competitor_words.intersection({"shoe", "shoes", "sneaker", "sneakers"}))
+    source_is_sandal = bool(competitor_words.intersection({"sandal", "sandals", "slipper", "slippers", "slide", "slides"}))
+    zendrop_is_open_footwear = bool(zendrop_words.intersection({"sandal", "sandals", "slipper", "slippers", "slide", "slides"}))
+    if source_is_closed_shoe and not source_is_sandal and zendrop_is_open_footwear:
+        return True
+    return False
 
 
 def normalize_zendrop_row(row: tuple) -> tuple:

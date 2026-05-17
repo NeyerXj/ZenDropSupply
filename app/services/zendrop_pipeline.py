@@ -31,6 +31,8 @@ class ZendropPipeline:
                 shipping_estimate = None
             cheapest_shipping = shipping_estimate.cheapest_option if shipping_estimate else None
             shipping_country_code = shipping_estimate.country_code if shipping_estimate else country_code
+            raw_payload = product.model_dump(mode="json")
+            raw_payload["_ttd_search_queries"] = merge_raw_search_queries(raw_payload, keyword)
             self.database.execute(
                 """
                 insert into zendrop_products (
@@ -63,7 +65,7 @@ class ZendropPipeline:
                     product.description,
                     product.price_usd,
                     product.image,
-                    json.dumps(product.model_dump(mode="json"), ensure_ascii=False),
+                    json.dumps(raw_payload, ensure_ascii=False),
                     shipping_country_code,
                     cheapest_shipping.price if cheapest_shipping else None,
                     cheapest_shipping.estimated_delivery if cheapest_shipping else None,
@@ -71,3 +73,16 @@ class ZendropPipeline:
             )
         self.database.commit()
         return search_result.products
+
+
+def merge_raw_search_queries(raw_payload: dict, keyword: str) -> list[str]:
+    existing = raw_payload.get("_ttd_search_queries")
+    queries = existing if isinstance(existing, list) else []
+    result: list[str] = []
+    seen: set[str] = set()
+    for query in [*queries, keyword]:
+        clean_query = str(query).strip().lower()
+        if clean_query and clean_query not in seen:
+            result.append(clean_query)
+            seen.add(clean_query)
+    return result

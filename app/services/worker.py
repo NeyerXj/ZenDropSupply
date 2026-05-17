@@ -13,7 +13,12 @@ from app.providers.competitor_shopify import CompetitorShopifyClient
 from app.providers.gemini_images import GeminiImageClient
 from app.providers.openai_content import OpenAIContentClient
 from app.providers.zendrop import ZendropMcpClient
-from app.services.approval_matching import build_approval_matches, find_top_zendrop_matches, queue_approval_match_jobs
+from app.services.approval_matching import (
+    build_approval_matches,
+    find_top_zendrop_matches,
+    match_source_queries,
+    queue_approval_match_jobs,
+)
 from app.services.competitor_pipeline import CompetitorPipeline
 from app.services.filtering import get_active_filter_config
 from app.services.final_catalog import FinalCatalogService
@@ -25,6 +30,12 @@ from app.services.pipeline_state import (
     update_pipeline_run_status,
 )
 from app.services.search_terms import zendrop_search_queries, zendrop_search_text
+from app.services.visual_search_queries import (
+    OpenAIVisualSearchQueryBuilder,
+    cached_visual_search_queries,
+    merge_search_queries,
+    store_visual_search_queries,
+)
 from app.services.zendrop_pipeline import ZendropPipeline
 
 
@@ -123,9 +134,14 @@ class PipelineWorker:
                     if is_postgres_url(self.settings.database_url):
                         database.execute("select pg_advisory_lock(?)", (ZENDROP_API_LOCK_ID,))
                         lock_acquired = True
+                    competitor_product_id = payload.get("competitor_product_id")
                     pipeline = ZendropPipeline(database=database, zendrop_client=client)
                     products = []
-                    keywords = payload.get("keywords") or [payload["keyword"]]
+                    keywords = await self._zendrop_keywords(
+                        database=database,
+                        http_client=http_client,
+                        payload=payload,
+                    )
                     for keyword in keywords:
                         await asyncio.sleep(0.8)
                         products.extend(
@@ -135,7 +151,6 @@ class PipelineWorker:
                                 country_code=payload.get("country_code") or self.settings.zendrop.default_country_code,
                             )
                         )
-                    competitor_product_id = payload.get("competitor_product_id")
                     if competitor_product_id:
                         enqueue_pipeline_job(
                             database=database,
@@ -151,6 +166,30 @@ class PipelineWorker:
                         database.execute("select pg_advisory_unlock(?)", (ZENDROP_API_LOCK_ID,))
                         database.commit()
         return {"products_saved": len({product.product_id for product in products}), "keywords": keywords}
+
+    async def _zendrop_keywords(self, database, http_client: httpx.AsyncClient, payload: dict[str, Any]) -> list[str]:
+        fallback_queries = payload.get("keywords") or [payload["keyword"]]
+        competitor_product_id = payload.get("competitor_product_id")
+        if not competitor_product_id:
+            return merge_search_queries([], fallback_queries)
+        row = database.execute(
+            """
+            select title, image_path, raw_json
+            from competitor_products
+            where id = ?
+            """,
+            (int(competitor_product_id),),
+        ).fetchone()
+        if row is None:
+            return merge_search_queries([], fallback_queries)
+        title, image_path, raw_json = row
+        visual_queries = cached_visual_search_queries(raw_json)
+        if not visual_queries and image_path:
+            builder = OpenAIVisualSearchQueryBuilder(settings=self.settings.openai, http_client=http_client)
+            visual_queries = await builder.generate(title=title, image_path=Path(image_path))
+            if visual_queries:
+                store_visual_search_queries(database, int(competitor_product_id), visual_queries)
+        return merge_search_queries(visual_queries, fallback_queries)
 
     async def run_approval_matching(self, job: dict, payload: dict[str, Any]) -> dict[str, Any]:
         with open_database(self.settings.database_url) as database:
@@ -342,7 +381,7 @@ def build_image_prompt(payload: dict[str, Any]) -> str:
 
 def approval_match_diagnostics(database, competitor_product_id: int) -> dict[str, Any]:
     product_row = database.execute(
-        "select title from competitor_products where id = ?",
+        "select title, raw_json from competitor_products where id = ?",
         (competitor_product_id,),
     ).fetchone()
     if product_row is None:
@@ -389,6 +428,7 @@ def approval_match_diagnostics(database, competitor_product_id: int) -> dict[str
         min_score=0,
         excluded_product_ids=rejected_zendrop_ids,
         limit=3,
+        source_queries=match_source_queries(product_row[0], product_row[1]),
     )
     if not candidates:
         return {

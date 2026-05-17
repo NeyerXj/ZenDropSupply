@@ -4,7 +4,9 @@ from app.config import Settings
 from app.database import open_database
 from app.providers.openai_content import GeneratedProductContent, OpenAIContentClient
 from app.services.pipeline_state import claim_next_pipeline_job, complete_pipeline_job, create_competitor_batch_run, enqueue_pipeline_job
+from app.services.visual_search_queries import VISUAL_QUERY_CACHE_KEY
 from app.services.worker import PipelineWorker
+from app.services.zendrop_pipeline import ZendropPipeline
 
 
 def test_claim_next_pipeline_job_marks_job_running(tmp_path):
@@ -118,3 +120,53 @@ async def test_openai_content_job_queues_final_model_images_for_approved_product
 
     assert len(jobs) == 1
     assert str(competitor_product_id) in jobs[0][1]
+
+
+@pytest.mark.asyncio
+async def test_zendrop_search_uses_cached_visual_queries_before_title_queries(tmp_path, monkeypatch):
+    settings = Settings(database_url=f"sqlite:///{tmp_path / 'pipeline.db'}")
+    seen_keywords = []
+
+    async def fake_search_and_store(self, keyword, limit, country_code):
+        seen_keywords.append(keyword)
+        return []
+
+    monkeypatch.setattr(ZendropPipeline, "search_and_store", fake_search_and_store)
+
+    with open_database(settings.database_url) as database:
+        database.execute(
+            """
+            insert into competitor_products (store_url, handle, title, tags_json, status, raw_json)
+            values (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "https://example.com",
+                "shoe",
+                "Orthopedic Shoes for Women",
+                "[]",
+                "ready_for_zendrop",
+                f'{{"{VISUAL_QUERY_CACHE_KEY}": ["black slip-on shoes", "women orthopedic sneakers"]}}',
+            ),
+        )
+        product_id = database.execute("select id from competitor_products").fetchone()[0]
+        database.commit()
+
+    worker = PipelineWorker(settings=settings)
+    result = await worker.run_zendrop_search(
+        {"id": 1, "run_id": 2},
+        {
+            "keyword": "women shoes",
+            "keywords": ["women shoes", "orthopedic shoes"],
+            "competitor_product_id": product_id,
+            "limit": 6,
+            "country_code": "ca",
+        },
+    )
+
+    assert seen_keywords[:4] == [
+        "black slip-on shoes",
+        "black slip-on sneakers",
+        "women orthopedic sneakers",
+        "women shoes",
+    ]
+    assert result["keywords"] == seen_keywords
