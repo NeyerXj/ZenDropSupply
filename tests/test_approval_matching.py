@@ -1,7 +1,7 @@
 import json
 
 from app.database import open_database
-from app.services.approval_matching import build_approval_matches, list_approval_cards
+from app.services.approval_matching import build_approval_matches, list_approval_cards, score_zendrop_candidate
 
 
 def test_build_approval_matches_links_best_zendrop_candidate(tmp_path):
@@ -67,7 +67,7 @@ def test_build_approval_matches_uses_zendrop_only(tmp_path):
             insert into competitor_products (
                 store_url, handle, title, price, tags_json, status, raw_json
             )
-            values ('https://example.com', 'maxi-kleid', 'Maxi Kleid Damen | Eleganter Fall', 79, '[]', 'ready_for_zendrop', '{}')
+            values ('https://example.com', 'maxi-dress', 'Women Elegant Maxi Dress', 79, '[]', 'ready_for_zendrop', '{}')
             """
         )
         database.execute(
@@ -88,7 +88,7 @@ def test_build_approval_matches_uses_zendrop_only(tmp_path):
     assert cards[0]["zendrop"]["total_cost_usd"] == 27.0
 
 
-def test_build_approval_matches_keeps_low_confidence_zendrop_candidate_for_review(tmp_path):
+def test_build_approval_matches_rejects_low_confidence_zendrop_candidate(tmp_path):
     database_url = f"sqlite:///{tmp_path / 'pipeline.db'}"
     with open_database(database_url) as database:
         database.execute(
@@ -128,6 +128,32 @@ def test_build_approval_matches_keeps_low_confidence_zendrop_candidate_for_revie
         result = build_approval_matches(database=database)
         cards = list_approval_cards(database=database, storage_dir=tmp_path / "storage")
 
-    assert result == {"matches_created": 1}
-    assert cards[0]["zendrop"]["product_id"] == 2809564
-    assert cards[0]["visual_status"] == "review"
+    assert result == {"matches_created": 0}
+    assert cards == []
+
+
+def test_zendrop_match_score_rejects_wrong_category():
+    score = score_zendrop_candidate(
+        "Red strapless maxi dress with side slit",
+        "Pink satin midi skirt for women",
+    )
+
+    assert score == 0
+
+
+def test_zendrop_match_score_penalizes_wrong_shoe_style():
+    score = score_zendrop_candidate(
+        "White lace up platform sneakers for women",
+        "Grey slip on orthopedic walking shoes for women",
+    )
+
+    assert score < 82
+
+
+def test_zendrop_match_score_keeps_close_dress_match():
+    score = score_zendrop_candidate(
+        "Red strapless maxi dress with side slit",
+        "Burgundy strapless maxi evening dress with side slit",
+    )
+
+    assert score >= 62

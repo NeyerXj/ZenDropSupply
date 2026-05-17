@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import struct
 from typing import Any
+import zlib
 
 import httpx
 
@@ -152,6 +154,8 @@ class FinalCatalogService:
 
     async def generate_model_image_set(self, competitor_product_id: int, images_per_product: int = 6) -> dict[str, Any]:
         product = self._load_product(competitor_product_id)
+        if self.settings.gemini.image_mode == "fake":
+            return self.generate_fake_model_image_set(product, images_per_product)
         output_dir = self.settings.storage_dir / "final_model_images" / str(competitor_product_id)
         async with httpx.AsyncClient(timeout=240) as http_client:
             gemini = GeminiImageClient(self.settings.gemini, http_client, output_dir)
@@ -180,6 +184,54 @@ class FinalCatalogService:
                 generated += 1
             self._mark_image_set_done(image_set_id)
         return {"competitor_product_id": competitor_product_id, "generated": generated, "target_count": images_per_product}
+
+    def generate_fake_model_image_set(self, product: dict[str, Any], images_per_product: int = 6) -> dict[str, Any]:
+        competitor_product_id = int(product["id"])
+        output_dir = self.settings.storage_dir / "final_model_images" / str(competitor_product_id)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        with open_database(self.settings.database_url) as database:
+            row = database.execute(
+                "select id from final_image_sets where competitor_product_id = ?",
+                (competitor_product_id,),
+            ).fetchone()
+            if row:
+                image_set_id = row[0]
+                database.execute(
+                    "update final_image_sets set target_count = ?, status = 'generating', updated_at = current_timestamp where id = ?",
+                    (images_per_product, image_set_id),
+                )
+            else:
+                image_set_id = database.execute(
+                    """
+                    insert into final_image_sets (competitor_product_id, target_count, status, updated_at)
+                    values (?, ?, 'generating', current_timestamp)
+                    returning id
+                    """,
+                    (competitor_product_id, images_per_product),
+                ).fetchone()[0]
+            database.commit()
+        generated = 0
+        for index, shot_key in enumerate(SHOT_KEYS[:images_per_product]):
+            if self._shot_exists(image_set_id, shot_key):
+                continue
+            image_path = output_dir / f"{shot_key}.png"
+            write_fake_png(image_path, index=index)
+            self._save_final_image(
+                image_set_id=image_set_id,
+                competitor_product_id=competitor_product_id,
+                shot_key=shot_key,
+                prompt=f"Fake test image for {product['title']} / {shot_key}",
+                image_path=str(image_path),
+                raw={"mode": "fake", "shot_key": shot_key},
+            )
+            generated += 1
+        self._mark_image_set_done(image_set_id)
+        return {
+            "competitor_product_id": competitor_product_id,
+            "generated": generated,
+            "target_count": images_per_product,
+            "mode": "fake",
+        }
 
     async def upload_shopify_draft(self, competitor_product_id: int, min_images: int = 5) -> dict[str, Any]:
         product = self._load_product(competitor_product_id)
@@ -427,6 +479,36 @@ def build_shopify_description(title: str) -> str:
         "<li>Draft status keeps the item unpublished until manual approval.</li>"
         "<li>Price and compare-at price are prepared for merchandising.</li></ul>"
     )
+
+
+def write_fake_png(path: Path, index: int) -> None:
+    width = 900
+    height = 1200
+    palette = [
+        (118, 71, 84),
+        (47, 111, 99),
+        (44, 62, 80),
+        (164, 132, 92),
+        (132, 91, 164),
+        (92, 128, 164),
+    ]
+    red, green, blue = palette[index % len(palette)]
+    rows = []
+    for y in range(height):
+        shade = int(28 * (y / max(height - 1, 1)))
+        pixel = bytes((min(red + shade, 255), min(green + shade, 255), min(blue + shade, 255)))
+        rows.append(b"\x00" + pixel * width)
+    raw = b"".join(rows)
+    path.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        + png_chunk(b"IDAT", zlib.compress(raw, level=6))
+        + png_chunk(b"IEND", b"")
+    )
+
+
+def png_chunk(kind: bytes, data: bytes) -> bytes:
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
 
 
 def media_url(image_path: str | None, storage_dir: Path) -> str | None:

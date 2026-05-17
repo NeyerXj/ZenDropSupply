@@ -19,6 +19,7 @@ class GeminiSettings(BaseModel):
     api_key: str = ""
     api_url: str = "https://generativelanguage.googleapis.com/v1beta"
     image_model: str = "gemini-3-pro-image-preview"
+    image_mode: str = "fake"
 
 
 class ShopifySettings(BaseModel):
@@ -58,6 +59,7 @@ class EnvironmentSettings(BaseSettings):
     gemini_api_key: str = ""
     gemini_api_url: str = "https://generativelanguage.googleapis.com/v1beta"
     gemini_image_model: str = "gemini-3-pro-image-preview"
+    gemini_image_mode: str = "fake"
     shopify_store: str = ""
     shopify_access_token: str = ""
     shopify_api_version: str = "2026-04"
@@ -84,6 +86,7 @@ class EnvironmentSettings(BaseSettings):
                 api_key=self.gemini_api_key,
                 api_url=self.gemini_api_url,
                 image_model=self.gemini_image_model,
+                image_mode=self.gemini_image_mode,
             ),
             shopify=ShopifySettings(
                 store=self.shopify_store,

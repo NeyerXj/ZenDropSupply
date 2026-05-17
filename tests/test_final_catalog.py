@@ -1,7 +1,16 @@
 import json
+from pathlib import Path
 
+import pytest
+
+from app.config import Settings
 from app.database import open_database
-from app.services.final_catalog import list_final_catalog_status, queue_final_image_jobs, queue_shopify_upload_jobs
+from app.services.final_catalog import (
+    FinalCatalogService,
+    list_final_catalog_status,
+    queue_final_image_jobs,
+    queue_shopify_upload_jobs,
+)
 
 
 def insert_competitor_product(database, title="Floral Maxi Dress", image_path=None, image_url=None):
@@ -180,3 +189,30 @@ def test_queue_shopify_jobs_requires_minimum_ready_images_and_skips_uploaded(tmp
 
     assert queued == 1
     assert json.loads(jobs[0][0])["competitor_product_id"] == ready_product_id
+
+
+@pytest.mark.asyncio
+async def test_final_image_generation_uses_fake_images_by_default(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'pipeline.db'}"
+    storage_dir = tmp_path / "storage"
+    with open_database(database_url) as database:
+        product_id = insert_competitor_product(database, title="Red Maxi Dress")
+        database.commit()
+
+    service = FinalCatalogService(Settings(database_url=database_url, storage_dir=storage_dir))
+    result = await service.generate_model_image_set(product_id, images_per_product=5)
+
+    assert result["mode"] == "fake"
+    with open_database(database_url) as database:
+        image_set = database.execute(
+            "select status, generated_count from final_image_sets where competitor_product_id = ?",
+            (product_id,),
+        ).fetchone()
+        images = database.execute(
+            "select image_path, raw_json from final_generated_images where competitor_product_id = ?",
+            (product_id,),
+        ).fetchall()
+    assert image_set == ("ready", 5)
+    assert len(images) == 5
+    assert all(json.loads(raw_json)["mode"] == "fake" for _, raw_json in images)
+    assert all((storage_dir / "final_model_images" / str(product_id) / Path(image_path).name).exists() for image_path, _ in images)
