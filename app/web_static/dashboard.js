@@ -58,8 +58,20 @@ function renderSummary() {
     <article class="metric-card">
       <div class="metric-value">${state.summary[key] ?? 0}</div>
       <div class="metric-label">${labels[key]}</div>
+      ${metricHint(key)}
     </article>
   `).join("");
+}
+
+function metricHint(key) {
+  if (key !== "preview_cards_total") return "";
+  const active = Number(state.summary.match_jobs_active_total || 0);
+  const done = Number(state.summary.match_jobs_done_total || 0);
+  const rejected = Number(state.summary.vision_rejected_total || 0);
+  if (active > 0) return `<div class="metric-hint">${active} matching now</div>`;
+  if (rejected > 0) return `<div class="metric-hint">${rejected} vision rejected</div>`;
+  if (done > 0) return `<div class="metric-hint">${done} checked</div>`;
+  return "";
 }
 
 function renderSourceBreakdown() {
@@ -116,6 +128,7 @@ function renderJobActivity() {
         <span>No active jobs</span>
         <strong>${doneTotal} done</strong>
         ${failedTotal ? `<strong>${failedTotal} failed</strong>` : ""}
+        ${state.summary.vision_rejected_total ? `<strong>${state.summary.vision_rejected_total} vision rejected</strong>` : ""}
       </div>
       ${failedJobs.length ? renderJobList(failedJobs, "Recent failed jobs") : ""}
       ${renderRecentMatchDiagnostics()}
@@ -155,6 +168,7 @@ function renderRecentMatchDiagnostics() {
               <strong>${diagnostics.product_title || jobPayloadLabel(job) || "Match job"}</strong>
               <span>${diagnostics.reason || "Match job completed"}</span>
             </div>
+            ${diagnostics.rejected_candidates !== undefined ? `<small>${diagnostics.rejected_candidates} Zendrop candidates banned for this source product</small>` : ""}
             ${diagnostics.selected_candidate ? `<small>${diagnostics.selected_candidate} · score ${Math.round(diagnostics.score || 0)}</small>` : ""}
             ${candidates ? `<small>${candidates}</small>` : ""}
           </article>
@@ -339,9 +353,16 @@ function renderNextAction() {
     return;
   }
   if (!state.approvalCards.length && (state.summary.ready_for_zendrop || 0) > 0) {
-    title.textContent = "Build match preview";
-    description.textContent = "Queue Zendrop plus AI image matching for ready source products.";
-    button.textContent = "Build preview";
+    const activeMatches = Number(state.summary.match_jobs_active_total || 0);
+    const rejectedMatches = Number(state.summary.vision_rejected_total || 0);
+    const doneMatches = Number(state.summary.match_jobs_done_total || 0);
+    title.textContent = activeMatches ? "Match preview is running" : rejectedMatches ? "No accepted matches yet" : "Build match preview";
+    description.textContent = activeMatches
+      ? `${activeMatches} source products are being checked by Zendrop and AI Vision.`
+      : rejectedMatches
+        ? `${doneMatches} match jobs completed. AI Vision rejected ${rejectedMatches} Zendrop candidates, so no cards are ready for approval.`
+        : "Queue Zendrop plus AI image matching for ready source products.";
+    button.textContent = rejectedMatches ? "Retry preview search" : "Build preview";
     button.dataset.action = "preview";
     return;
   }
@@ -510,7 +531,9 @@ async function runNextAction() {
       await startSourcing(document.getElementById("sourceSetupForm"));
     } else if (button.dataset.action === "preview") {
       const result = await fetchJson("/api/run/approval-matching", { method: "POST" });
-      showToast(`Match preview jobs queued: ${result.count}.`);
+      const skipped = Number(result.skipped_no_candidates || 0);
+      const extra = result.count ? (skipped ? ` ${skipped} source products had no unbanned Zendrop candidates.` : "") : ` ${skipped ? `${skipped} source products had no unbanned Zendrop candidates.` : "No new jobs were needed."}`;
+      showToast(`Match preview jobs queued: ${result.count}.${extra}`);
     } else if (button.dataset.action === "images") {
       const result = await fetchJson("/api/run/final-images", {
         method: "POST",

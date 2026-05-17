@@ -626,6 +626,13 @@ button:disabled {
   text-transform: uppercase;
 }
 
+.metric-hint {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.3;
+  margin-top: 6px;
+}
+
 .control-grid {
   display: grid;
   gap: 12px;

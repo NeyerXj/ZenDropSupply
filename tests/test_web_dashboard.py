@@ -73,6 +73,9 @@ def test_dashboard_summary_counts_pipeline_records(tmp_path):
     assert response.status_code == 200
     assert response.json() == {
         "preview_cards_total": 1,
+        "vision_rejected_total": 0,
+        "match_jobs_done_total": 0,
+        "match_jobs_active_total": 0,
         "competitor_total": 2,
         "ready_for_zendrop": 1,
         "zendrop_total": 1,
@@ -343,7 +346,7 @@ def test_dashboard_builds_and_lists_approval_cards(tmp_path):
     list_response = client.get("/api/approval-cards")
 
     assert build_response.status_code == 200
-    assert build_response.json() == {"count": 1, "jobs_queued": 1}
+    assert build_response.json() == {"count": 1, "jobs_queued": 1, "skipped_no_candidates": 0}
     assert list_response.status_code == 200
     assert list_response.json()["cards"] == []
     with open_database(settings.database_url) as database:

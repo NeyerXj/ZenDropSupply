@@ -211,7 +211,7 @@ LOGIN_HTML = """<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>TTD Admin Login</title>
-  <link rel="stylesheet" href="/assets/dashboard.css?v=reset-v2">
+  <link rel="stylesheet" href="/assets/dashboard.css?v=match-status-v1">
 </head>
 <body class="login-body">
   <main class="login-card">
@@ -352,7 +352,7 @@ DASHBOARD_HTML = """<!doctype html>
       </section>
     </main>
   </div>
-  <script src="/assets/dashboard.js?v=reset-v2"></script>
+  <script src="/assets/dashboard.js?v=match-status-v1"></script>
 </body>
 </html>"""
 

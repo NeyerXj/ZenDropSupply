@@ -110,9 +110,16 @@ def queue_approval_match_jobs(database: sqlite3.Connection, run_id: int | None =
                 active_product_ids.add(int(payload["competitor_product_id"]))
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
+    zendrop_rows = database.execute(
+        """
+        select product_id, name, price_usd, shipping_price_usd, image_url, raw_json
+        from zendrop_products
+        order by updated_at desc, product_id desc
+        """
+    ).fetchall()
     rows = database.execute(
         """
-        select cp.id
+        select cp.id, cp.title
         from competitor_products cp
         where cp.status in ('ready_for_zendrop', 'zendrop_matched')
           and not exists (
@@ -124,9 +131,32 @@ def queue_approval_match_jobs(database: sqlite3.Connection, run_id: int | None =
         """,
     ).fetchall()
     queued = 0
+    skipped_no_candidates = 0
     for row in rows:
         product_id = int(row[0])
+        product_title = row[1]
         if product_id in active_product_ids:
+            continue
+        rejected_zendrop_ids = {
+            rejected_row[0]
+            for rejected_row in database.execute(
+                """
+                select zendrop_product_id
+                from product_matches
+                where competitor_product_id = ? and status = 'rejected'
+                """,
+                (product_id,),
+            ).fetchall()
+        }
+        candidates = find_top_zendrop_matches(
+            search_text=zendrop_search_text(product_title),
+            zendrop_rows=zendrop_rows,
+            min_score=0,
+            excluded_product_ids=rejected_zendrop_ids,
+            limit=1,
+        )
+        if not candidates:
+            skipped_no_candidates += 1
             continue
         enqueue_pipeline_job(
             database=database,
@@ -136,7 +166,7 @@ def queue_approval_match_jobs(database: sqlite3.Connection, run_id: int | None =
             priority=130,
         )
         queued += 1
-    return {"jobs_queued": queued}
+    return {"jobs_queued": queued, "skipped_no_candidates": skipped_no_candidates}
 
 
 def build_zendrop_only_matches(
