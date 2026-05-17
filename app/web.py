@@ -527,6 +527,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 product_match_id=product_match_id,
                 competitor_product_id=row[1],
             )
+            build_approval_matches(
+                database=database,
+                openai_settings=app_settings.openai,
+                storage_dir=app_settings.storage_dir,
+                competitor_product_ids=[row[1]],
+            )
         database.commit()
         return {
             "id": product_match_id,
@@ -610,7 +616,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @web_app.post("/api/run/approval-matching")
     def run_approval_matching(_: None = Depends(require_admin), database=Depends(get_database)) -> dict:
-        result = build_approval_matches(database=database)
+        result = build_approval_matches(
+            database=database,
+            openai_settings=app_settings.openai,
+            storage_dir=app_settings.storage_dir,
+        )
         return {"count": result["matches_created"], **result}
 
     return web_app

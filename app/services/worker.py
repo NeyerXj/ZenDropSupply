@@ -128,7 +128,11 @@ class PipelineWorker:
 
     async def run_approval_matching(self, job: dict, payload: dict[str, Any]) -> dict[str, Any]:
         with open_database(self.settings.database_url) as database:
-            result = build_approval_matches(database=database)
+            result = build_approval_matches(
+                database=database,
+                openai_settings=self.settings.openai,
+                storage_dir=self.settings.storage_dir,
+            )
         return result
 
     async def run_openai_content(self, job: dict, payload: dict[str, Any]) -> dict[str, Any]:
