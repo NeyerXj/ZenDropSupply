@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 
 from app.config import Settings
-from app.database import open_database
+from app.database import is_postgres_url, open_database
 from app.providers.competitor_shopify import CompetitorShopifyClient
 from app.providers.gemini_images import GeminiImageClient
 from app.providers.openai_content import OpenAIContentClient
@@ -26,6 +26,9 @@ from app.services.pipeline_state import (
 )
 from app.services.search_terms import zendrop_search_queries, zendrop_search_text
 from app.services.zendrop_pipeline import ZendropPipeline
+
+
+ZENDROP_API_LOCK_ID = 461122735
 
 
 class PipelineWorker:
@@ -112,31 +115,41 @@ class PipelineWorker:
         return {"products_scraped": len(products), "ready_products": len(ready_rows)}
 
     async def run_zendrop_search(self, job: dict, payload: dict[str, Any]) -> dict[str, Any]:
-        async with httpx.AsyncClient(timeout=30) as http_client:
+        async with httpx.AsyncClient(timeout=90) as http_client:
             client = ZendropMcpClient(settings=self.settings.zendrop, http_client=http_client)
             with open_database(self.settings.database_url) as database:
-                pipeline = ZendropPipeline(database=database, zendrop_client=client)
-                products = []
-                keywords = payload.get("keywords") or [payload["keyword"]]
-                for keyword in keywords:
-                    products.extend(
-                        await pipeline.search_and_store(
-                            keyword=keyword,
-                            limit=int(payload.get("limit") or 8),
-                            country_code=payload.get("country_code") or self.settings.zendrop.default_country_code,
+                lock_acquired = False
+                try:
+                    if is_postgres_url(self.settings.database_url):
+                        database.execute("select pg_advisory_lock(?)", (ZENDROP_API_LOCK_ID,))
+                        lock_acquired = True
+                    pipeline = ZendropPipeline(database=database, zendrop_client=client)
+                    products = []
+                    keywords = payload.get("keywords") or [payload["keyword"]]
+                    for keyword in keywords:
+                        await asyncio.sleep(0.8)
+                        products.extend(
+                            await pipeline.search_and_store(
+                                keyword=keyword,
+                                limit=int(payload.get("limit") or 8),
+                                country_code=payload.get("country_code") or self.settings.zendrop.default_country_code,
+                            )
                         )
-                    )
-                competitor_product_id = payload.get("competitor_product_id")
-                if competitor_product_id:
-                    enqueue_pipeline_job(
-                        database=database,
-                        run_id=job["run_id"],
-                        stage="approval_match_product",
-                        payload={"competitor_product_id": int(competitor_product_id)},
-                        priority=130,
-                    )
-                else:
-                    queue_approval_match_jobs(database=database, run_id=job["run_id"])
+                    competitor_product_id = payload.get("competitor_product_id")
+                    if competitor_product_id:
+                        enqueue_pipeline_job(
+                            database=database,
+                            run_id=job["run_id"],
+                            stage="approval_match_product",
+                            payload={"competitor_product_id": int(competitor_product_id)},
+                            priority=130,
+                        )
+                    else:
+                        queue_approval_match_jobs(database=database, run_id=job["run_id"])
+                finally:
+                    if lock_acquired:
+                        database.execute("select pg_advisory_unlock(?)", (ZENDROP_API_LOCK_ID,))
+                        database.commit()
         return {"products_saved": len({product.product_id for product in products}), "keywords": keywords}
 
     async def run_approval_matching(self, job: dict, payload: dict[str, Any]) -> dict[str, Any]:

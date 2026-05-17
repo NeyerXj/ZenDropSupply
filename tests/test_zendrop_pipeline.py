@@ -3,7 +3,7 @@ import pytest
 
 from app.config import Settings, ZendropSettings
 from app.database import open_database
-from app.providers.zendrop import ZendropMcpClient
+from app.providers.zendrop import ZendropMcpClient, ZendropMcpError
 from app.services.zendrop_pipeline import ZendropPipeline
 
 
@@ -50,3 +50,44 @@ async def test_zendrop_pipeline_persists_search_product_and_shipping(tmp_path):
     assert rows == [(2331830, "Lace V-Neck Maxi Dress", 12.39, 10.05)]
     assert any("get_catalog_products" in request for request in requests)
     assert any("get_catalog_shipping_estimate" in request for request in requests)
+
+
+@pytest.mark.asyncio
+async def test_zendrop_pipeline_persists_product_when_shipping_is_rate_limited(tmp_path, monkeypatch):
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr("app.services.zendrop_pipeline.asyncio.sleep", no_sleep)
+
+    settings = Settings(
+        database_url=f"sqlite:///{tmp_path / 'pipeline.db'}",
+        zendrop=ZendropSettings(api_token="secret-token"),
+    )
+
+    class FakeZendropClient:
+        async def search_products(self, keyword, limit):
+            class Product:
+                product_id = 2331830
+                name = "Lace V-Neck Maxi Dress"
+                description = "<p>Dress</p>"
+                price_usd = 12.39
+                image = "https://file.zendrop.com/main.webp"
+
+                def model_dump(self, mode):
+                    return {"id": self.product_id, "name": self.name}
+
+            class Result:
+                products = [Product()]
+
+            return Result()
+
+        async def get_shipping_estimate(self, product_id, country_code):
+            raise ZendropMcpError("rate limited")
+
+    async with open_database(settings.database_url) as database:
+        pipeline = ZendropPipeline(database=database, zendrop_client=FakeZendropClient())
+        products = await pipeline.search_and_store(keyword="maxi dress", limit=1, country_code="ca")
+        rows = database.execute("select product_id, name, price_usd, shipping_price_usd from zendrop_products").fetchall()
+
+    assert len(products) == 1
+    assert rows == [(2331830, "Lace V-Neck Maxi Dress", 12.39, None)]

@@ -2,7 +2,7 @@ import httpx
 import pytest
 
 from app.config import ZendropSettings
-from app.providers.zendrop import ZendropMcpClient, ZendropMcpError
+from app.providers.zendrop import ZendropMcpClient, ZendropMcpError, parse_retry_after
 
 
 @pytest.mark.asyncio
@@ -88,3 +88,47 @@ async def test_mcp_error_is_raised_for_json_rpc_error():
         client = ZendropMcpClient(settings=settings, http_client=http_client)
         with pytest.raises(ZendropMcpError, match="Unknown tool"):
             await client.get_product(product_id=1)
+
+
+@pytest.mark.asyncio
+async def test_client_retries_429_response(monkeypatch):
+    responses = [429, 200]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        status = responses.pop(0)
+        if status == 429:
+            return httpx.Response(429, headers={"retry-after": "0"})
+        return httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": '{"total": 0, "products": []}',
+                        }
+                    ]
+                },
+            },
+        )
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr("app.providers.zendrop.asyncio.sleep", no_sleep)
+
+    settings = ZendropSettings(api_token="secret-token")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = ZendropMcpClient(settings=settings, http_client=http_client)
+        result = await client.search_products(keyword="dress")
+
+    assert result.products == []
+    assert responses == []
+
+
+def test_parse_retry_after_seconds():
+    assert parse_retry_after("3") == 3.0
+    assert parse_retry_after("bad") is None

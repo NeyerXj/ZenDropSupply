@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import asyncio
 from typing import Any
 
 import httpx
@@ -102,21 +103,7 @@ class ZendropMcpClient:
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if not self.settings.api_token:
             raise ZendropMcpError("ZENDROP_API_TOKEN is required")
-        response = await self.http_client.post(
-            self.settings.api_url,
-            headers={
-                "Authorization": f"Bearer {self.settings.api_token}",
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
-            },
-            json={
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "tools/call",
-                "params": {"name": name, "arguments": arguments},
-            },
-        )
-        response.raise_for_status()
+        response = await self._post_with_retry(name=name, arguments=arguments)
         envelope = response.json()
         if error := envelope.get("error"):
             raise ZendropMcpError(error.get("message", "Zendrop MCP error"))
@@ -130,3 +117,37 @@ class ZendropMcpClient:
                     raise ZendropMcpError(f"Invalid Zendrop MCP JSON payload: {error}") from error
         raise ZendropMcpError("Zendrop MCP response did not include text content")
 
+    async def _post_with_retry(self, name: str, arguments: dict[str, Any]) -> httpx.Response:
+        waits = [2.0, 5.0, 10.0]
+        for attempt in range(len(waits) + 1):
+            response = await self.http_client.post(
+                self.settings.api_url,
+                headers={
+                    "Authorization": f"Bearer {self.settings.api_token}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json, text/event-stream",
+                },
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": name, "arguments": arguments},
+                },
+            )
+            if response.status_code != 429:
+                response.raise_for_status()
+                return response
+            if attempt >= len(waits):
+                response.raise_for_status()
+            retry_after = parse_retry_after(response.headers.get("retry-after"))
+            await asyncio.sleep(retry_after or waits[attempt])
+        raise ZendropMcpError("Zendrop retry loop exhausted")
+
+
+def parse_retry_after(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        return None

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 
-from app.providers.zendrop import ZendropMcpClient, ZendropProductSummary
+from app.providers.zendrop import ZendropMcpClient, ZendropMcpError, ZendropProductSummary
 
 
 class ZendropPipeline:
@@ -19,11 +20,17 @@ class ZendropPipeline:
     ) -> list[ZendropProductSummary]:
         search_result = await self.zendrop_client.search_products(keyword=keyword, limit=limit)
         for product in search_result.products:
-            shipping_estimate = await self.zendrop_client.get_shipping_estimate(
-                product_id=product.product_id,
-                country_code=country_code,
-            )
-            cheapest_shipping = shipping_estimate.cheapest_option
+            shipping_estimate = None
+            try:
+                await asyncio.sleep(0.35)
+                shipping_estimate = await self.zendrop_client.get_shipping_estimate(
+                    product_id=product.product_id,
+                    country_code=country_code,
+                )
+            except ZendropMcpError:
+                shipping_estimate = None
+            cheapest_shipping = shipping_estimate.cheapest_option if shipping_estimate else None
+            shipping_country_code = shipping_estimate.country_code if shipping_estimate else country_code
             self.database.execute(
                 """
                 insert into zendrop_products (
@@ -57,11 +64,10 @@ class ZendropPipeline:
                     product.price_usd,
                     product.image,
                     json.dumps(product.model_dump(mode="json"), ensure_ascii=False),
-                    shipping_estimate.country_code,
+                    shipping_country_code,
                     cheapest_shipping.price if cheapest_shipping else None,
                     cheapest_shipping.estimated_delivery if cheapest_shipping else None,
                 ),
             )
         self.database.commit()
         return search_result.products
-
