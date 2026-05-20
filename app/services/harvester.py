@@ -17,6 +17,7 @@ from app.providers.zendrop import ZendropMcpClient, ZendropProductSummary
 DEFAULT_KEYWORDS = [""]
 DEFAULT_CATEGORY_ID = 16
 DEFAULT_CATEGORY_NAME = "Apparel & Accessories"
+RATE_LIMIT_COOLDOWN_SECONDS = 180
 
 
 @dataclass(frozen=True)
@@ -376,6 +377,7 @@ class HarvesterWorker:
                   and (
                     status = 'queued'
                     or (status = 'running' and claimed_until < current_timestamp)
+                    or (status = 'rate_limited' and claimed_until < current_timestamp)
                   )
                 order by case when keyword = '' then 0 else 1 end, page asc, id asc
                 for update skip locked
@@ -427,7 +429,7 @@ class HarvesterWorker:
         except httpx.HTTPStatusError as error:
             if error.response.status_code == 429:
                 mark_page_rate_limited(connection, run["id"], page["id"], str(error))
-                self.heartbeat(connection, run["id"], page["id"], "rate_limited", str(error)[:300])
+                self.heartbeat(connection, None, None, "rate_limited", str(error)[:300])
                 return
             mark_page_failed(connection, run["id"], page["id"], str(error))
             self.heartbeat(connection, run["id"], page["id"], "error", str(error)[:300])
@@ -625,10 +627,14 @@ def mark_page_rate_limited(connection: psycopg.Connection, run_id: int, page_id:
     connection.execute(
         """
         update harvest_pages
-        set status = 'queued', claimed_by = null, claimed_until = null, error_message = %s, updated_at = current_timestamp
+        set status = 'rate_limited',
+            claimed_by = null,
+            claimed_until = current_timestamp + (%s || ' seconds')::interval,
+            error_message = %s,
+            updated_at = current_timestamp
         where id = %s
         """,
-        (message[:500], page_id),
+        (RATE_LIMIT_COOLDOWN_SECONDS, message[:500], page_id),
     )
     connection.execute(
         """
