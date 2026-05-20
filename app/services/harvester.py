@@ -221,12 +221,13 @@ def calculate_metrics(connection: psycopg.Connection, run: dict[str, Any], setti
     ).fetchone()
     seconds = max(float(recent["seconds"] or 0), 1.0)
     products_per_minute = round((int(recent["product_count"] if "product_count" in recent else recent["products"]) / seconds) * 60, 2)
+    new_products_per_minute = round((int(recent["new_products"] or 0) / seconds) * 60, 2)
     pages_per_minute = round((int(recent["pages"] or 0) / seconds) * 60, 2)
     duplicates = int(recent["duplicates"] or 0)
     products = int(recent["products"] or 0)
     duplicate_rate = round(duplicates / max(1, products), 4)
     remaining = max(0, int(run["target_unique"]) - int(run["unique_products"]))
-    eta_seconds = int((remaining / products_per_minute) * 60) if products_per_minute > 0 else None
+    eta_seconds = int((remaining / new_products_per_minute) * 60) if new_products_per_minute > 0 else None
     return {
         "products_per_minute": products_per_minute,
         "pages_per_minute": pages_per_minute,
@@ -617,7 +618,7 @@ def mark_page_done(
             updated_at = current_timestamp
         where id = %s
         """,
-        (product_count, product_count, duplicate_count, row["run_id"]),
+        (new_count, product_count, duplicate_count, row["run_id"]),
     )
     connection.commit()
     maybe_complete_run(connection, row["run_id"])
