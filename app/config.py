@@ -1,103 +1,53 @@
-from pydantic import BaseModel, Field
+from __future__ import annotations
+
+from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pathlib import Path
 
 
 class ZendropSettings(BaseModel):
     api_token: str = ""
     api_url: str = "https://app.zendrop.com/mcp/v1"
-    default_country_code: str = "ca"
 
 
-class OpenAISettings(BaseModel):
-    api_key: str = ""
-    api_url: str = "https://api.openai.com/v1"
-    model: str = "gpt-4.1-mini"
-
-
-class GeminiSettings(BaseModel):
-    api_key: str = ""
-    api_url: str = "https://generativelanguage.googleapis.com/v1beta"
-    image_model: str = "gemini-3-pro-image-preview"
-    image_mode: str = "fake"
-
-
-class ShopifySettings(BaseModel):
-    store: str = ""
-    access_token: str = ""
-    api_version: str = "2026-04"
-    graphql_url: str = ""
-
-
-class AdminSettings(BaseModel):
-    username: str = "admin"
-    password: str = "admin"
-    session_secret: str = "change-me"
+class HarvesterSettings(BaseModel):
+    worker_id: str = "local-worker"
+    poll_seconds: float = 2.0
+    claim_seconds: int = 180
+    controller_public_host: str = "127.0.0.1"
+    controller_public_port: int = 8091
+    postgres_public_host: str = "127.0.0.1"
 
 
 class Settings(BaseModel):
-    database_url: str = "sqlite:///storage/pipeline.db"
-    storage_dir: Path = Path("storage")
-    zendrop: ZendropSettings = Field(default_factory=ZendropSettings)
-    openai: OpenAISettings = Field(default_factory=OpenAISettings)
-    gemini: GeminiSettings = Field(default_factory=GeminiSettings)
-    shopify: ShopifySettings = Field(default_factory=ShopifySettings)
-    admin: AdminSettings = Field(default_factory=AdminSettings)
+    database_url: str = "postgresql://zendrop:zendrop@postgres:5432/zendrop_supply"
+    zendrop: ZendropSettings = ZendropSettings()
+    harvester: HarvesterSettings = HarvesterSettings()
 
 
 class EnvironmentSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    database_url: str = "sqlite:///storage/pipeline.db"
-    storage_dir: Path = Path("storage")
+    database_url: str = "postgresql://zendrop:zendrop@postgres:5432/zendrop_supply"
     zendrop_api_token: str = ""
     zendrop_api_url: str = "https://app.zendrop.com/mcp/v1"
-    zendrop_default_country_code: str = "ca"
-    openai_api_key: str = ""
-    openai_api_url: str = "https://api.openai.com/v1"
-    openai_model: str = "gpt-4.1-mini"
-    gemini_api_key: str = ""
-    gemini_api_url: str = "https://generativelanguage.googleapis.com/v1beta"
-    gemini_image_model: str = "gemini-3-pro-image-preview"
-    gemini_image_mode: str = "fake"
-    shopify_store: str = ""
-    shopify_access_token: str = ""
-    shopify_api_version: str = "2026-04"
-    shopify_graphql_url: str = ""
-    admin_username: str = "admin"
-    admin_password: str = "admin"
-    admin_session_secret: str = "change-me"
+    harvester_worker_id: str = "local-worker"
+    harvester_poll_seconds: float = 2.0
+    harvester_claim_seconds: int = 180
+    controller_public_host: str = "127.0.0.1"
+    controller_public_port: int = 8091
+    postgres_public_host: str = "127.0.0.1"
 
     def to_settings(self) -> Settings:
         return Settings(
             database_url=self.database_url,
-            storage_dir=self.storage_dir,
-            zendrop=ZendropSettings(
-                api_token=self.zendrop_api_token,
-                api_url=self.zendrop_api_url,
-                default_country_code=self.zendrop_default_country_code,
-            ),
-            openai=OpenAISettings(
-                api_key=self.openai_api_key,
-                api_url=self.openai_api_url,
-                model=self.openai_model,
-            ),
-            gemini=GeminiSettings(
-                api_key=self.gemini_api_key,
-                api_url=self.gemini_api_url,
-                image_model=self.gemini_image_model,
-                image_mode=self.gemini_image_mode,
-            ),
-            shopify=ShopifySettings(
-                store=self.shopify_store,
-                access_token=self.shopify_access_token,
-                api_version=self.shopify_api_version,
-                graphql_url=self.shopify_graphql_url,
-            ),
-            admin=AdminSettings(
-                username=self.admin_username,
-                password=self.admin_password,
-                session_secret=self.admin_session_secret,
+            zendrop=ZendropSettings(api_token=self.zendrop_api_token, api_url=self.zendrop_api_url),
+            harvester=HarvesterSettings(
+                worker_id=self.harvester_worker_id,
+                poll_seconds=self.harvester_poll_seconds,
+                claim_seconds=self.harvester_claim_seconds,
+                controller_public_host=self.controller_public_host,
+                controller_public_port=self.controller_public_port,
+                postgres_public_host=self.postgres_public_host,
             ),
         )
 

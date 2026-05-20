@@ -2,80 +2,47 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: ttd_pipeline
-      POSTGRES_USER: ttd
-      POSTGRES_PASSWORD: ttd
+      POSTGRES_DB: zendrop_supply
+      POSTGRES_USER: zendrop
+      POSTGRES_PASSWORD: zendrop
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - zendrop_supply_postgres:/var/lib/postgresql/data
+    ports:
+      - "5434:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ttd -d ttd_pipeline"]
+      test: ["CMD-SHELL", "pg_isready -U zendrop -d zendrop_supply"]
       interval: 5s
       timeout: 5s
       retries: 10
-  redis:
-    image: redis:7-alpine
-    command: redis-server --appendonly yes
-    volumes:
-      - redis_data:/data
-  pipeline:
+
+  controller:
     build: .
     working_dir: /app
-    environment:
-      DATABASE_URL: postgresql://ttd:ttd@postgres:5432/ttd_pipeline
-      ZENDROP_API_URL: https://app.zendrop.com/mcp/v1
-      ZENDROP_DEFAULT_COUNTRY_CODE: ca
     env_file:
-      - .env
-    volumes:
-      - ./storage:/app/storage
-      - ./output:/app/output
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_started
-    command: python -m app.cli --help
-  web:
-    build: .
-    working_dir: /app
+      - path: .env
+        required: false
     environment:
-      DATABASE_URL: postgresql://ttd:ttd@postgres:5432/ttd_pipeline
-      STORAGE_DIR: /app/storage
-      ZENDROP_API_URL: https://app.zendrop.com/mcp/v1
-      ZENDROP_DEFAULT_COUNTRY_CODE: ca
-    env_file:
-      - .env
-    volumes:
-      - ./storage:/app/storage
-      - ./output:/app/output
+      DATABASE_URL: postgresql://zendrop:zendrop@postgres:5432/zendrop_supply
     ports:
-      - "8080:8080"
+      - "8091:8090"
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_started
-    command: uvicorn app.web:app --host 0.0.0.0 --port 8080
+    command: uvicorn app.controller:app --host 0.0.0.0 --port 8090
+
   worker:
     build: .
     working_dir: /app
-    environment:
-      DATABASE_URL: postgresql://ttd:ttd@postgres:5432/ttd_pipeline
-      STORAGE_DIR: /app/storage
-      ZENDROP_API_URL: https://app.zendrop.com/mcp/v1
-      ZENDROP_DEFAULT_COUNTRY_CODE: ca
+    profiles: ["worker"]
     env_file:
-      - .env
-    volumes:
-      - ./storage:/app/storage
-      - ./output:/app/output
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql://zendrop:zendrop@postgres:5432/zendrop_supply
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_started
     command: python -m app.worker
 
 volumes:
-  postgres_data:
-  redis_data:
+  zendrop_supply_postgres:

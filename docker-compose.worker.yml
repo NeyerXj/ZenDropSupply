@@ -1,0 +1,9 @@
+services:
+  worker:
+    build: .
+    working_dir: /app
+    env_file:
+      - path: .env
+        required: false
+    command: python -m app.worker
+    restart: unless-stopped

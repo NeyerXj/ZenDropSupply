@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
 import asyncio
+import json
 from typing import Any
 
 import httpx
@@ -38,10 +38,6 @@ class ZendropProductSummary(BaseModel):
             return None
 
 
-class ZendropProductDetail(ZendropProductSummary):
-    categories: list[dict[str, Any]] = Field(default_factory=list)
-
-
 class ZendropSearchResult(BaseModel):
     total: int = 0
     products: list[ZendropProductSummary] = Field(default_factory=list)
@@ -70,28 +66,9 @@ class ZendropMcpClient:
     settings: ZendropSettings
     http_client: httpx.AsyncClient
 
-    async def search_products(
-        self,
-        keyword: str,
-        page: int = 1,
-        limit: int = 20,
-        category_id: int | None = None,
-        min_price: float | None = None,
-        max_price: float | None = None,
-    ) -> ZendropSearchResult:
-        arguments: dict[str, Any] = {"keyword": keyword, "page": page, "limit": limit}
-        if category_id is not None:
-            arguments["category_id"] = category_id
-        if min_price is not None:
-            arguments["min_price"] = min_price
-        if max_price is not None:
-            arguments["max_price"] = max_price
-        payload = await self.call_tool("get_catalog_products", arguments)
+    async def search_products(self, keyword: str, page: int = 1, limit: int = 60) -> ZendropSearchResult:
+        payload = await self.call_tool("get_catalog_products", {"keyword": keyword, "page": page, "limit": limit})
         return ZendropSearchResult.model_validate(payload)
-
-    async def get_product(self, product_id: int) -> ZendropProductDetail:
-        payload = await self.call_tool("get_catalog_product", {"product_id": product_id})
-        return ZendropProductDetail.model_validate(payload)
 
     async def get_shipping_estimate(self, product_id: int, country_code: str) -> ZendropShippingEstimate:
         payload = await self.call_tool(
@@ -107,12 +84,10 @@ class ZendropMcpClient:
         envelope = response.json()
         if error := envelope.get("error"):
             raise ZendropMcpError(error.get("message", "Zendrop MCP error"))
-        content = envelope.get("result", {}).get("content", [])
-        for entry in content:
+        for entry in envelope.get("result", {}).get("content", []):
             if entry.get("type") == "text":
-                text = entry.get("text", "")
                 try:
-                    return json.loads(text)
+                    return json.loads(entry.get("text", ""))
                 except json.JSONDecodeError as error:
                     raise ZendropMcpError(f"Invalid Zendrop MCP JSON payload: {error}") from error
         raise ZendropMcpError("Zendrop MCP response did not include text content")
@@ -139,15 +114,5 @@ class ZendropMcpClient:
                 return response
             if attempt >= len(waits):
                 response.raise_for_status()
-            retry_after = parse_retry_after(response.headers.get("retry-after"))
-            await asyncio.sleep(retry_after or waits[attempt])
+            await asyncio.sleep(waits[attempt])
         raise ZendropMcpError("Zendrop retry loop exhausted")
-
-
-def parse_retry_after(value: str | None) -> float | None:
-    if not value:
-        return None
-    try:
-        return max(0.0, float(value))
-    except ValueError:
-        return None

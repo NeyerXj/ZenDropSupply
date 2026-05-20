@@ -1,13 +1,8 @@
-.DS_Store
 .env
-.env.*
-!.env.example
-.pytest_cache/
-.ruff_cache/
+.venv/
 __pycache__/
-*.py[cod]
-.playwright-cli/
+.pytest_cache/
 storage/
 output/
-*.log
-
+*.pyc
+.DS_Store
