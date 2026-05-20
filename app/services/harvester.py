@@ -15,6 +15,8 @@ from app.providers.zendrop import ZendropMcpClient, ZendropProductSummary
 
 
 DEFAULT_KEYWORDS = [""]
+DEFAULT_CATEGORY_ID = 16
+DEFAULT_CATEGORY_NAME = "Apparel & Accessories"
 
 
 @dataclass(frozen=True)
@@ -23,6 +25,9 @@ class HarvestRunRequest:
     requested_origin_country_code: str = "cn"
     destination_country_code: str = "us"
     keywords: list[str] | None = None
+    category_id: int = DEFAULT_CATEGORY_ID
+    category_name: str = DEFAULT_CATEGORY_NAME
+    first_image_only: bool = True
     per_page_limit: int = 60
     max_pages_per_keyword: int = 2000
     fetch_shipping: bool = False
@@ -48,15 +53,19 @@ def create_run(connection: psycopg.Connection, request: HarvestRunRequest) -> di
             """
             insert into harvest_runs (
                 status, target_unique, requested_origin_country_code, destination_country_code,
+                category_id, category_name, first_image_only,
                 keywords_json, per_page_limit, max_pages_per_keyword, fetch_shipping, updated_at
             )
-            values ('queued', %s, %s, %s, %s, %s, %s, %s, current_timestamp)
+            values ('queued', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, current_timestamp)
             returning id
             """,
             (
                 request.target_unique,
                 request.requested_origin_country_code.lower(),
                 request.destination_country_code.lower(),
+                request.category_id,
+                request.category_name,
+                request.first_image_only,
                 json.dumps(keywords, ensure_ascii=False),
                 request.per_page_limit,
                 request.max_pages_per_keyword,
@@ -367,6 +376,7 @@ class HarvesterWorker:
                 keyword=page["keyword"],
                 page=int(page["page"]),
                 limit=int(run["per_page_limit"]),
+                category_id=int(run["category_id"]),
             )
             remaining = max(0, int(run["target_unique"]) - int(run["unique_products"]))
             products = result.products[:remaining]
@@ -408,10 +418,15 @@ def store_products(connection: psycopg.Connection, run: dict[str, Any], products
     new_count = 0
     for product in products:
         raw_json = product.model_dump(mode="json")
+        if run["first_image_only"]:
+            raw_json["images"] = first_image_payload(product)
         raw_json["_zendrop_supply"] = {
             "run_id": run["id"],
             "requested_origin_country_code": run["requested_origin_country_code"],
             "destination_country_code": run["destination_country_code"],
+            "category_id": run["category_id"],
+            "category_name": run["category_name"],
+            "first_image_only": run["first_image_only"],
             "origin_verified": False,
         }
         row = connection.execute(
@@ -445,16 +460,38 @@ def store_products(connection: psycopg.Connection, run: dict[str, Any], products
         ).fetchone()
         if row and row["inserted"]:
             new_count += 1
-        upsert_images(connection, product)
+        upsert_images(connection, product, first_image_only=bool(run["first_image_only"]))
     connection.commit()
     return new_count
 
 
-def upsert_images(connection: psycopg.Connection, product: ZendropProductSummary) -> None:
+def first_image_payload(product: ZendropProductSummary) -> list[dict[str, Any]]:
+    image_url = first_product_image_url(product)
+    if not image_url:
+        return []
+    for image in product.images:
+        if image.url == image_url:
+            return [image.model_dump(mode="json")]
+    return [{"url": image_url}]
+
+
+def first_product_image_url(product: ZendropProductSummary) -> str | None:
+    if product.image:
+        return product.image
+    for image in product.images:
+        if image.url:
+            return image.url
+    return None
+
+
+def upsert_images(connection: psycopg.Connection, product: ZendropProductSummary, first_image_only: bool = True) -> None:
     image_urls = []
     if product.image:
         image_urls.append(product.image)
-    image_urls.extend(image.url for image in product.images if image.url)
+    if first_image_only:
+        image_urls = image_urls[:1] or [image.url for image in product.images[:1] if image.url]
+    else:
+        image_urls.extend(image.url for image in product.images if image.url)
     seen = set()
     for position, image_url in enumerate(image_urls):
         if image_url in seen:

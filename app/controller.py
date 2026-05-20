@@ -7,6 +7,8 @@ from pydantic import BaseModel, Field
 from app.config import Settings, load_settings
 from app.database import open_database
 from app.services.harvester import (
+    DEFAULT_CATEGORY_ID,
+    DEFAULT_CATEGORY_NAME,
     HarvestRunRequest,
     create_run,
     dashboard_snapshot,
@@ -19,6 +21,9 @@ class CreateRunRequest(BaseModel):
     requested_origin_country_code: str = Field(default="cn", min_length=2, max_length=2)
     destination_country_code: str = Field(default="us", min_length=2, max_length=2)
     keywords: list[str] | None = Field(default=None, max_length=300)
+    category_id: int = Field(default=DEFAULT_CATEGORY_ID, ge=1)
+    category_name: str = Field(default=DEFAULT_CATEGORY_NAME, min_length=1, max_length=120)
+    first_image_only: bool = True
     per_page_limit: int = Field(default=60, ge=1, le=60)
     max_pages_per_keyword: int = Field(default=2000, ge=1, le=25000)
     fetch_shipping: bool = False
@@ -53,6 +58,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     requested_origin_country_code=request.requested_origin_country_code,
                     destination_country_code=request.destination_country_code,
                     keywords=request.keywords,
+                    category_id=request.category_id,
+                    category_name=request.category_name,
+                    first_image_only=request.first_image_only,
                     per_page_limit=request.per_page_limit,
                     max_pages_per_keyword=request.max_pages_per_keyword,
                     fetch_shipping=request.fetch_shipping,
@@ -123,9 +131,11 @@ INDEX_HTML = """
       <label>Target products <input id="targetUnique" type="number" min="1" max="1200000" value="100000"></label>
       <label>Ship from metadata <input id="origin" maxlength="2" value="cn"></label>
       <label>Deliver to <input id="destination" maxlength="2" value="us"></label>
+      <label>Zendrop category <input id="categoryName" value="Apparel & Accessories"></label>
+      <label>Category ID <input id="categoryId" type="number" min="1" value="16"></label>
       <label>Page size <input id="pageSize" type="number" min="1" max="60" value="60"></label>
-      <label>Max pages per keyword <input id="maxPages" type="number" min="1" max="25000" value="2000"></label>
-      <label>Keywords, one per line <textarea id="keywords" placeholder="Leave empty for full catalog browse"></textarea></label>
+      <label>Max category pages <input id="maxPages" type="number" min="1" max="25000" value="2000"></label>
+      <label class="check-row"><input id="firstImageOnly" type="checkbox" checked><span>Save only the first Zendrop image</span></label>
       <label class="check-row"><input id="fetchShipping" type="checkbox"><span>Fetch US shipping price for every product</span></label>
       <div class="actions">
         <button id="startButton">Start fresh run</button>
@@ -159,7 +169,7 @@ INDEX_HTML = """
       </table>
       <h2>Recent pages</h2>
       <table>
-        <thead><tr><th>Keyword</th><th>Page</th><th>Status</th><th>Worker</th><th>Products</th><th>New</th><th>Duration</th></tr></thead>
+        <thead><tr><th>Category</th><th>Page</th><th>Status</th><th>Worker</th><th>Products</th><th>New</th><th>Duration</th></tr></thead>
         <tbody id="pagesBody"><tr><td colspan="7" class="muted">No pages yet</td></tr></tbody>
       </table>
     </section>
@@ -194,20 +204,22 @@ INDEX_HTML = """
       `).join("") : '<tr><td colspan="5" class="muted">No workers yet</td></tr>';
       const pages = snapshot.recent_pages || [];
       document.getElementById("pagesBody").innerHTML = pages.length ? pages.map((page) => `
-        <tr><td>${page.keyword || "catalog"}</td><td>${page.page}</td><td>${page.status}</td><td>${page.claimed_by || ""}</td><td>${page.product_count}</td><td>${page.new_product_count}</td><td>${page.duration_ms ? `${page.duration_ms}ms` : ""}</td></tr>
+        <tr><td>${page.keyword || run?.category_name || "category"}</td><td>${page.page}</td><td>${page.status}</td><td>${page.claimed_by || ""}</td><td>${page.product_count}</td><td>${page.new_product_count}</td><td>${page.duration_ms ? `${page.duration_ms}ms` : ""}</td></tr>
       `).join("") : '<tr><td colspan="7" class="muted">No pages yet</td></tr>';
     }
     async function refresh() { render(await fetchJson("/api/dashboard")); }
     document.getElementById("refreshButton").onclick = refresh;
     document.getElementById("startButton").onclick = async () => {
-      const keywords = value("keywords").split("\\n").map((line) => line.trim()).filter(Boolean);
       const response = await fetchJson("/api/runs", {
         method: "POST",
         body: JSON.stringify({
           target_unique: numberValue("targetUnique"),
           requested_origin_country_code: value("origin"),
           destination_country_code: value("destination"),
-          keywords: keywords.length ? keywords : null,
+          keywords: null,
+          category_id: numberValue("categoryId"),
+          category_name: value("categoryName"),
+          first_image_only: document.getElementById("firstImageOnly").checked,
           per_page_limit: numberValue("pageSize"),
           max_pages_per_keyword: numberValue("maxPages"),
           fetch_shipping: document.getElementById("fetchShipping").checked

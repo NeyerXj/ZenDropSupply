@@ -66,8 +66,19 @@ class ZendropMcpClient:
     settings: ZendropSettings
     http_client: httpx.AsyncClient
 
-    async def search_products(self, keyword: str, page: int = 1, limit: int = 60) -> ZendropSearchResult:
-        payload = await self.call_tool("get_catalog_products", {"keyword": keyword, "page": page, "limit": limit})
+    async def search_products(
+        self,
+        keyword: str | None = None,
+        page: int = 1,
+        limit: int = 60,
+        category_id: int | None = None,
+    ) -> ZendropSearchResult:
+        arguments: dict[str, Any] = {"page": page, "limit": limit}
+        if keyword:
+            arguments["keyword"] = keyword
+        if category_id is not None:
+            arguments["category_id"] = category_id
+        payload = await self.call_tool("get_catalog_products", arguments)
         return ZendropSearchResult.model_validate(payload)
 
     async def get_shipping_estimate(self, product_id: int, country_code: str) -> ZendropShippingEstimate:

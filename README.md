@@ -7,13 +7,17 @@ This repo is separate from the main TTD app. It creates a fresh Postgres databas
 ## Defaults
 
 - Target: `100000` processed products
+- Zendrop category: `Apparel & Accessories` (`category_id=16`)
 - Requested ship-from metadata: `cn`
 - Destination: `us`
 - Page size: `60`
+- Images: first product image only
 - Database: `zendrop_supply`
 - Controller UI: `http://localhost:8091`
 
 Zendrop MCP exposes destination shipping country, but it does not expose a `ship_from=china` filter in `get_catalog_products`. The app stores `requested_origin_country_code=cn` and `origin_verified=false` unless Zendrop starts returning verifiable origin data.
+
+The harvester uses Zendrop `category_id=16` instead of keyword searches. A live API check showed this category returns the Apparel & Accessories catalog, with about `117929` products at the time of the check. Product rows store only the first Zendrop image by default to reduce DB size and downstream image-index cost.
 
 ## Local controller
 

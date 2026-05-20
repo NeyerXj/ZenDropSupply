@@ -14,6 +14,9 @@ create table if not exists harvest_runs (
     target_unique integer not null default 100000,
     requested_origin_country_code text not null default 'cn',
     destination_country_code text not null default 'us',
+    category_id integer not null default 16,
+    category_name text not null default 'Apparel & Accessories',
+    first_image_only boolean not null default true,
     keywords_json text not null default '[""]',
     per_page_limit integer not null default 60,
     max_pages_per_keyword integer not null default 2000,
@@ -104,6 +107,10 @@ create index if not exists idx_harvest_pages_recent
     on harvest_pages(run_id, completed_at desc);
 create index if not exists idx_supply_products_destination
     on supply_products(destination_country_code);
+
+alter table harvest_runs add column if not exists category_id integer not null default 16;
+alter table harvest_runs add column if not exists category_name text not null default 'Apparel & Accessories';
+alter table harvest_runs add column if not exists first_image_only boolean not null default true;
 """
 
 
