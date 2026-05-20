@@ -7,6 +7,8 @@ import psycopg
 from psycopg.rows import dict_row
 
 
+SCHEMA_LOCK_ID = 88420116
+
 SCHEMA_SQL = """
 create table if not exists harvest_runs (
     id bigserial primary key,
@@ -121,8 +123,16 @@ def open_database(database_url: str) -> Iterator[psycopg.Connection]:
     connection = psycopg.connect(database_url, row_factory=dict_row)
     try:
         with connection.cursor() as cursor:
+            cursor.execute("select pg_advisory_lock(%s)", (SCHEMA_LOCK_ID,))
             cursor.execute(SCHEMA_SQL)
+            cursor.execute("select pg_advisory_unlock(%s)", (SCHEMA_LOCK_ID,))
         connection.commit()
         yield connection
+    except Exception:
+        connection.rollback()
+        with connection.cursor() as cursor:
+            cursor.execute("select pg_advisory_unlock(%s)", (SCHEMA_LOCK_ID,))
+        connection.commit()
+        raise
     finally:
         connection.close()
