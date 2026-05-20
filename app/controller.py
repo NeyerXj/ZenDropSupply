@@ -26,7 +26,7 @@ class CreateRunRequest(BaseModel):
     category_name: str = Field(default=DEFAULT_CATEGORY_NAME, min_length=1, max_length=120)
     first_image_only: bool = True
     per_page_limit: int = Field(default=60, ge=1, le=60)
-    max_pages_per_keyword: int = Field(default=2000, ge=1, le=25000)
+    max_pages_per_keyword: int = Field(default=5000, ge=1, le=100000)
     fetch_shipping: bool = False
 
 
@@ -143,7 +143,7 @@ INDEX_HTML = """
       <label>Zendrop category <input id="categoryName" value="Apparel & Accessories"></label>
       <label>Category ID <input id="categoryId" type="number" min="1" value="16"></label>
       <label>Page size <input id="pageSize" type="number" min="1" max="60" value="60"></label>
-      <label>Max category pages <input id="maxPages" type="number" min="1" max="25000" value="2000"></label>
+      <label>Max category pages <input id="maxPages" type="number" min="1" max="100000" value="5000"></label>
       <label class="check-row"><input id="firstImageOnly" type="checkbox" checked><span>Save only the first Zendrop image</span></label>
       <label class="check-row"><input id="fetchShipping" type="checkbox"><span>Fetch US shipping price for every product</span></label>
       <div class="actions">

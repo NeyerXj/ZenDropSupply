@@ -18,6 +18,7 @@ DEFAULT_KEYWORDS = [""]
 DEFAULT_CATEGORY_ID = 16
 DEFAULT_CATEGORY_NAME = "Apparel & Accessories"
 RATE_LIMIT_COOLDOWN_SECONDS = 180
+EMPTY_PAGE_STOP_THRESHOLD = 20
 
 
 @dataclass(frozen=True)
@@ -30,7 +31,7 @@ class HarvestRunRequest:
     category_name: str = DEFAULT_CATEGORY_NAME
     first_image_only: bool = True
     per_page_limit: int = 60
-    max_pages_per_keyword: int = 2000
+    max_pages_per_keyword: int = 5000
     fetch_shipping: bool = False
 
 
@@ -672,6 +673,20 @@ def maybe_complete_run(connection: psycopg.Connection, run_id: int) -> None:
     run = get_run(connection, run_id)
     if run["status"] not in {"queued", "running"}:
         return
+    empty_tail = connection.execute(
+        """
+        select count(*) as page_count,
+               coalesce(sum(product_count), 0) as product_count
+        from (
+            select product_count
+            from harvest_pages
+            where run_id = %s and status = 'done'
+            order by page desc
+            limit %s
+        ) recent_pages
+        """,
+        (run_id, EMPTY_PAGE_STOP_THRESHOLD),
+    ).fetchone()
     remaining = connection.execute(
         """
         select count(*) as count
@@ -680,7 +695,11 @@ def maybe_complete_run(connection: psycopg.Connection, run_id: int) -> None:
         """,
         (run_id,),
     ).fetchone()["count"]
-    if run["unique_products"] >= run["target_unique"] or int(remaining or 0) == 0:
+    empty_tail_reached = (
+        int(empty_tail["page_count"] or 0) >= EMPTY_PAGE_STOP_THRESHOLD
+        and int(empty_tail["product_count"] or 0) == 0
+    )
+    if run["unique_products"] >= run["target_unique"] or int(remaining or 0) == 0 or empty_tail_reached:
         connection.execute(
             """
             update harvest_runs
