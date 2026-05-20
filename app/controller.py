@@ -142,6 +142,7 @@ INDEX_HTML = """
       <label>Deliver to <input id="destination" maxlength="2" value="us"></label>
       <label>Zendrop category <input id="categoryName" value="Apparel & Accessories"></label>
       <label>Category ID <input id="categoryId" type="number" min="1" value="16"></label>
+      <label>Keywords <textarea id="keywords" rows="4" placeholder="One keyword per line. Empty means full category."></textarea></label>
       <label>Page size <input id="pageSize" type="number" min="1" max="60" value="60"></label>
       <label>Max category pages <input id="maxPages" type="number" min="1" max="100000" value="5000"></label>
       <label class="check-row"><input id="firstImageOnly" type="checkbox" checked><span>Save only the first Zendrop image</span></label>
@@ -243,7 +244,7 @@ INDEX_HTML = """
           target_unique: numberValue("targetUnique"),
           requested_origin_country_code: value("origin"),
           destination_country_code: value("destination"),
-          keywords: null,
+          keywords: document.getElementById("keywords").value.split(/[\n,]+/).map((keyword) => keyword.trim()).filter(Boolean),
           category_id: numberValue("categoryId"),
           category_name: value("categoryName"),
           first_image_only: document.getElementById("firstImageOnly").checked,

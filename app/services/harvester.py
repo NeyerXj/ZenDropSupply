@@ -605,10 +605,12 @@ def mark_page_done(
             completed_at = current_timestamp,
             updated_at = current_timestamp
         where id = %s
-        returning run_id
+        returning run_id, keyword, page
         """,
         (product_count, new_count, duplicate_count, duration_ms, page_id),
     ).fetchone()
+    if product_count == 0:
+        mark_keyword_exhausted(connection, int(row["run_id"]), str(row["keyword"]), int(row["page"]))
     connection.execute(
         """
         update harvest_runs
@@ -623,6 +625,39 @@ def mark_page_done(
     )
     connection.commit()
     maybe_complete_run(connection, row["run_id"])
+
+
+def mark_keyword_exhausted(connection: psycopg.Connection, run_id: int, keyword: str, page: int) -> None:
+    empty_tail = connection.execute(
+        """
+        select count(*) as page_count,
+               coalesce(sum(product_count), 0) as product_count
+        from (
+            select product_count
+            from harvest_pages
+            where run_id = %s and keyword = %s and status = 'done' and page <= %s
+            order by page desc
+            limit %s
+        ) recent_pages
+        """,
+        (run_id, keyword, page, EMPTY_PAGE_STOP_THRESHOLD),
+    ).fetchone()
+    if (
+        int(empty_tail["page_count"] or 0) >= EMPTY_PAGE_STOP_THRESHOLD
+        and int(empty_tail["product_count"] or 0) == 0
+    ):
+        connection.execute(
+            """
+            update harvest_pages
+            set status = 'exhausted',
+                updated_at = current_timestamp
+            where run_id = %s
+              and keyword = %s
+              and page > %s
+              and status = 'queued'
+            """,
+            (run_id, keyword, page),
+        )
 
 
 def mark_page_rate_limited(connection: psycopg.Connection, run_id: int, page_id: int, message: str) -> None:
@@ -673,20 +708,6 @@ def maybe_complete_run(connection: psycopg.Connection, run_id: int) -> None:
     run = get_run(connection, run_id)
     if run["status"] not in {"queued", "running"}:
         return
-    empty_tail = connection.execute(
-        """
-        select count(*) as page_count,
-               coalesce(sum(product_count), 0) as product_count
-        from (
-            select product_count
-            from harvest_pages
-            where run_id = %s and status = 'done'
-            order by page desc
-            limit %s
-        ) recent_pages
-        """,
-        (run_id, EMPTY_PAGE_STOP_THRESHOLD),
-    ).fetchone()
     remaining = connection.execute(
         """
         select count(*) as count
@@ -695,11 +716,7 @@ def maybe_complete_run(connection: psycopg.Connection, run_id: int) -> None:
         """,
         (run_id,),
     ).fetchone()["count"]
-    empty_tail_reached = (
-        int(empty_tail["page_count"] or 0) >= EMPTY_PAGE_STOP_THRESHOLD
-        and int(empty_tail["product_count"] or 0) == 0
-    )
-    if run["unique_products"] >= run["target_unique"] or int(remaining or 0) == 0 or empty_tail_reached:
+    if run["unique_products"] >= run["target_unique"] or int(remaining or 0) == 0:
         connection.execute(
             """
             update harvest_runs
