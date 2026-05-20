@@ -13,6 +13,7 @@ from app.services.harvester import (
     create_run,
     dashboard_snapshot,
     update_run_status,
+    update_worker_desired_status,
 )
 
 
@@ -75,6 +76,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with open_database(effective_settings.database_url) as connection:
             run = update_run_status(connection, run_id, status)
             return {"run": run, "dashboard": dashboard_snapshot(connection, effective_settings)}
+
+    @app.post("/api/workers/{worker_id}/{action}")
+    def worker_action(worker_id: str, action: str, settings: Settings = Depends(get_settings)) -> dict:
+        desired_status = {"enable": "enabled", "disable": "disabled"}.get(action, action)
+        effective_settings = settings or app_settings
+        with open_database(effective_settings.database_url) as connection:
+            worker = update_worker_desired_status(connection, worker_id, desired_status)
+            return {"worker": worker, "dashboard": dashboard_snapshot(connection, effective_settings)}
 
     return app
 
@@ -164,8 +173,8 @@ INDEX_HTML = """
       </div>
       <h2>Workers</h2>
       <table style="margin-bottom:18px;">
-        <thead><tr><th>Worker</th><th>Status</th><th>Pages</th><th>Products</th><th>Heartbeat</th></tr></thead>
-        <tbody id="workersBody"><tr><td colspan="5" class="muted">No workers yet</td></tr></tbody>
+        <thead><tr><th>Worker</th><th>Status</th><th>Desired</th><th>Pages</th><th>Products</th><th>Heartbeat</th><th>Control</th></tr></thead>
+        <tbody id="workersBody"><tr><td colspan="7" class="muted">No workers yet</td></tr></tbody>
       </table>
       <h2>Recent pages</h2>
       <table>
@@ -199,9 +208,27 @@ INDEX_HTML = """
       const setup = snapshot.worker_setup || {};
       document.getElementById("workerCommand").textContent = `${setup.clone || ""}\\ncp .env.example .env\\n# set ZENDROP_API_TOKEN and DATABASE_URL\\n${setup.env || ""}\\n${setup.run || ""}`;
       const workers = snapshot.workers || [];
-      document.getElementById("workersBody").innerHTML = workers.length ? workers.map((worker) => `
-        <tr><td>${worker.worker_id}</td><td>${worker.status}</td><td>${worker.processed_pages}</td><td>${worker.processed_products}</td><td>${worker.seconds_since_heartbeat}s ago</td></tr>
-      `).join("") : '<tr><td colspan="5" class="muted">No workers yet</td></tr>';
+      document.getElementById("workersBody").innerHTML = workers.length ? workers.map((worker) => {
+        const action = worker.desired_status === "disabled" ? "enable" : "disable";
+        const label = action === "enable" ? "Enable" : "Disable";
+        return `
+          <tr>
+            <td>${worker.worker_id}</td>
+            <td>${worker.status}</td>
+            <td>${worker.desired_status || "enabled"}</td>
+            <td>${worker.processed_pages}</td>
+            <td>${worker.processed_products}</td>
+            <td>${worker.seconds_since_heartbeat}s ago</td>
+            <td><button class="secondary" data-worker="${worker.worker_id}" data-action="${action}">${label}</button></td>
+          </tr>
+        `;
+      }).join("") : '<tr><td colspan="7" class="muted">No workers yet</td></tr>';
+      document.querySelectorAll("[data-worker]").forEach((button) => {
+        button.onclick = async () => {
+          const response = await fetchJson(`/api/workers/${encodeURIComponent(button.dataset.worker)}/${button.dataset.action}`, { method: "POST" });
+          render(response.dashboard);
+        };
+      });
       const pages = snapshot.recent_pages || [];
       document.getElementById("pagesBody").innerHTML = pages.length ? pages.map((page) => `
         <tr><td>${page.keyword || run?.category_name || "category"}</td><td>${page.page}</td><td>${page.status}</td><td>${page.claimed_by || ""}</td><td>${page.product_count}</td><td>${page.new_product_count}</td><td>${page.duration_ms ? `${page.duration_ms}ms` : ""}</td></tr>

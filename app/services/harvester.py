@@ -125,6 +125,28 @@ def update_run_status(connection: psycopg.Connection, run_id: int, status: str) 
     return get_run(connection, run_id)
 
 
+def update_worker_desired_status(connection: psycopg.Connection, worker_id: str, desired_status: str) -> dict[str, Any]:
+    if desired_status not in {"enabled", "disabled"}:
+        raise ValueError("Unsupported worker status")
+    row = connection.execute(
+        """
+        update harvest_workers
+        set desired_status = %s,
+            status = case when %s = 'disabled' then 'disabled' else status end,
+            current_run_id = case when %s = 'disabled' then null else current_run_id end,
+            current_page_id = case when %s = 'disabled' then null else current_page_id end,
+            heartbeat_at = current_timestamp
+        where worker_id = %s
+        returning *
+        """,
+        (desired_status, desired_status, desired_status, desired_status, worker_id),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"Worker {worker_id} does not exist")
+    connection.commit()
+    return dict(row)
+
+
 def dashboard_snapshot(connection: psycopg.Connection, settings: Settings) -> dict[str, Any]:
     run = latest_run(connection)
     workers = [
@@ -132,7 +154,7 @@ def dashboard_snapshot(connection: psycopg.Connection, settings: Settings) -> di
         for row in connection.execute(
             """
             select worker_id, status, current_run_id, current_page_id, processed_pages, processed_products,
-                   last_error, started_at, heartbeat_at,
+                   desired_status, last_error, started_at, heartbeat_at,
                    extract(epoch from (current_timestamp - heartbeat_at))::int as seconds_since_heartbeat
             from harvest_workers
             order by heartbeat_at desc
@@ -257,6 +279,9 @@ class HarvesterWorker:
 
             with open_database(self.settings.database_url) as connection:
                 self.register_worker(connection)
+                if self.worker_disabled(connection):
+                    self.heartbeat(connection, None, None, "disabled")
+                    return False
                 run = self.active_run(connection)
                 if run is None:
                     self.heartbeat(connection, None, None, "idle")
@@ -272,13 +297,25 @@ class HarvesterWorker:
     def register_worker(self, connection: psycopg.Connection) -> None:
         connection.execute(
             """
-            insert into harvest_workers (worker_id, status, heartbeat_at)
-            values (%s, 'online', current_timestamp)
-            on conflict(worker_id) do update set status = 'online', heartbeat_at = current_timestamp
+            insert into harvest_workers (worker_id, status, desired_status, heartbeat_at)
+            values (%s, 'online', 'enabled', current_timestamp)
+            on conflict(worker_id) do update set
+                status = case
+                    when harvest_workers.desired_status = 'disabled' then 'disabled'
+                    else 'online'
+                end,
+                heartbeat_at = current_timestamp
             """,
             (self.worker_id,),
         )
         connection.commit()
+
+    def worker_disabled(self, connection: psycopg.Connection) -> bool:
+        row = connection.execute(
+            "select desired_status from harvest_workers where worker_id = %s",
+            (self.worker_id,),
+        ).fetchone()
+        return bool(row and row["desired_status"] == "disabled")
 
     def heartbeat(
         self,

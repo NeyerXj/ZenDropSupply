@@ -92,6 +92,7 @@ create table if not exists supply_shipping_estimates (
 create table if not exists harvest_workers (
     worker_id text primary key,
     status text not null default 'online',
+    desired_status text not null default 'enabled',
     current_run_id bigint,
     current_page_id bigint,
     processed_pages integer not null default 0,
@@ -111,6 +112,7 @@ create index if not exists idx_supply_products_destination
 alter table harvest_runs add column if not exists category_id integer not null default 16;
 alter table harvest_runs add column if not exists category_name text not null default 'Apparel & Accessories';
 alter table harvest_runs add column if not exists first_image_only boolean not null default true;
+alter table harvest_workers add column if not exists desired_status text not null default 'enabled';
 """
 
 
