@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from threading import Lock
 from typing import Iterator
 
 import psycopg
@@ -8,6 +9,8 @@ from psycopg.rows import dict_row
 
 
 SCHEMA_LOCK_ID = 88420116
+_schema_lock = Lock()
+_schema_ready = False
 
 SCHEMA_SQL = """
 create table if not exists harvest_runs (
@@ -122,17 +125,33 @@ alter table harvest_workers add column if not exists desired_status text not nul
 def open_database(database_url: str) -> Iterator[psycopg.Connection]:
     connection = psycopg.connect(database_url, row_factory=dict_row)
     try:
-        with connection.cursor() as cursor:
-            cursor.execute("select pg_advisory_lock(%s)", (SCHEMA_LOCK_ID,))
-            cursor.execute(SCHEMA_SQL)
-            cursor.execute("select pg_advisory_unlock(%s)", (SCHEMA_LOCK_ID,))
-        connection.commit()
+        ensure_schema(connection)
         yield connection
     except Exception:
         connection.rollback()
-        with connection.cursor() as cursor:
-            cursor.execute("select pg_advisory_unlock(%s)", (SCHEMA_LOCK_ID,))
-        connection.commit()
         raise
     finally:
         connection.close()
+
+
+def ensure_schema(connection: psycopg.Connection) -> None:
+    global _schema_ready
+    if _schema_ready:
+        return
+
+    with _schema_lock:
+        if _schema_ready:
+            return
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("select pg_advisory_lock(%s)", (SCHEMA_LOCK_ID,))
+                cursor.execute(SCHEMA_SQL)
+                cursor.execute("select pg_advisory_unlock(%s)", (SCHEMA_LOCK_ID,))
+            connection.commit()
+            _schema_ready = True
+        except Exception:
+            connection.rollback()
+            with connection.cursor() as cursor:
+                cursor.execute("select pg_advisory_unlock(%s)", (SCHEMA_LOCK_ID,))
+            connection.commit()
+            raise
